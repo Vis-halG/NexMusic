@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Analog clock, 2×2: white dial with a violet ring and hands. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="4dp">
+
+    <AnalogClock
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:dial="@drawable/clock_dial"
+        android:hand_hour="@drawable/clock_hand_hour"
+        android:hand_minute="@drawable/clock_hand_minute"
+        android:hand_second="@drawable/clock_hand_second" />
+</FrameLayout>

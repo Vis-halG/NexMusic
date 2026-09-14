@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Date pill, 3×1: today's date in a violet circle, weekday, month and time. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_pill_surface"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingLeft="6dp"
+    android:paddingRight="16dp">
+
+    <FrameLayout
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="@drawable/widget_button">
+
+        <TextClock
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:format12Hour="d"
+            android:format24Hour="d"
+            android:textColor="#FFFFFFFF"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+    </FrameLayout>
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginLeft="10dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextClock
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:format12Hour="EEEE"
+            android:format24Hour="EEEE"
+            android:maxLines="1"
+            android:textColor="@color/widget_ink"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <TextClock
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:format12Hour="MMMM yyyy"
+            android:format24Hour="MMMM yyyy"
+            android:maxLines="1"
+            android:textColor="@color/widget_muted"
+            android:textSize="11sp" />
+    </LinearLayout>
+
+    <TextClock
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginLeft="8dp"
+        android:format12Hour="h:mm a"
+        android:format24Hour="HH:mm"
+        android:maxLines="1"
+        android:textColor="@color/widget_accent"
+        android:textSize="16sp"
+        android:textStyle="bold" />
+</LinearLayout>

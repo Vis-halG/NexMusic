@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Play button, 1×1: one round button that plays or pauses. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <ImageView
+        android:id="@+id/now_play"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:layout_gravity="center"
+        android:background="@drawable/widget_button_gradient"
+        android:contentDescription="@string/widget_play_pause"
+        android:padding="15dp"
+        android:src="@drawable/widget_play" />
+</FrameLayout>

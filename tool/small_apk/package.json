@@ -1,0 +1,8 @@
+{
+  "name": "nexmusic-small-apk",
+  "private": true,
+  "description": "Recompresses the arm64 release APK with zopfli so it stays under 10 MB.",
+  "dependencies": {
+    "@gfx/zopfli": "1.0.15"
+  }
+}

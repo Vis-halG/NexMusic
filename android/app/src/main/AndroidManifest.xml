@@ -1,5 +1,10 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Background playback with lock screen and notification controls. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
     <application
         android:label="nexMusic"
         android:name="${applicationName}"
@@ -37,7 +42,178 @@
                 <data android:mimeType="audio/*"/>
                 <data android:mimeType="video/*"/>
             </intent-filter>
+            <!-- Lets people share many songs or videos at once. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="audio/*"/>
+                <data android:mimeType="video/*"/>
+            </intent-filter>
         </activity>
+
+        <!-- Plays music in the background and shows its notification controls. -->
+        <service android:name="com.ryanheise.audioservice.AudioService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="true"
+            tools:ignore="Instantiatable">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService"/>
+            </intent-filter>
+        </service>
+        <receiver android:name="com.ryanheise.audioservice.MediaButtonReceiver"
+            android:exported="true"
+            tools:ignore="Instantiatable">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON"/>
+            </intent-filter>
+        </receiver>
+
+        <!-- Home screen widgets. -->
+        <receiver android:name=".NowPlayingWidget"
+            android:exported="false"
+            android:label="@string/widget_now_playing_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_now_playing_info"/>
+        </receiver>
+        <receiver android:name=".MiniPlayerWidget"
+            android:exported="false"
+            android:label="@string/widget_mini_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_player_mini_info"/>
+        </receiver>
+        <receiver android:name=".SquarePlayerWidget"
+            android:exported="false"
+            android:label="@string/widget_square_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_player_square_info"/>
+        </receiver>
+        <receiver android:name=".BigPlayerWidget"
+            android:exported="false"
+            android:label="@string/widget_big_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_player_big_info"/>
+        </receiver>
+        <receiver android:name=".TallPlayerWidget"
+            android:exported="false"
+            android:label="@string/widget_tall_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_player_tall_info"/>
+        </receiver>
+        <receiver android:name=".PlayButtonWidget"
+            android:exported="false"
+            android:label="@string/widget_button_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_player_button_info"/>
+        </receiver>
+        <receiver android:name=".BigClockWidget"
+            android:exported="false"
+            android:label="@string/widget_big_clock_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_clock_big_info"/>
+        </receiver>
+        <receiver android:name=".AnalogClockWidget"
+            android:exported="false"
+            android:label="@string/widget_analog_clock_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_clock_analog_info"/>
+        </receiver>
+        <receiver android:name=".ClockPlayerWidget"
+            android:exported="false"
+            android:label="@string/widget_clock_player_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_clock_player_info"/>
+        </receiver>
+        <receiver android:name=".StackedClockWidget"
+            android:exported="false"
+            android:label="@string/widget_stacked_clock_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_clock_stacked_info"/>
+        </receiver>
+        <receiver android:name=".DateClockWidget"
+            android:exported="false"
+            android:label="@string/widget_date_clock_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_clock_date_info"/>
+        </receiver>
+        <receiver android:name=".QuickActionsWidget"
+            android:exported="false"
+            android:label="@string/widget_quick_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_quick_actions_info"/>
+        </receiver>
+        <receiver android:name=".LatestSongsWidget"
+            android:exported="false"
+            android:label="@string/widget_latest_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_latest_info"/>
+        </receiver>
+        <receiver android:name=".RecentSongsWidget"
+            android:exported="false"
+            android:label="@string/widget_recent_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_recent_info"/>
+        </receiver>
+        <receiver android:name=".LikedSongsWidget"
+            android:exported="false"
+            android:label="@string/widget_liked_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider"
+                android:resource="@xml/widget_liked_info"/>
+        </receiver>
+        <receiver android:name=".WidgetMediaReceiver" android:exported="false"/>
+
+        <!-- Activity push notifications sent by push_worker/worker.js. -->
+        <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="activity"/>
+        <meta-data android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_notification"/>
+        <meta-data android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/widget_accent"/>
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

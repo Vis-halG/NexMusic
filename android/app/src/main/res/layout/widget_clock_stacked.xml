@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Stacked clock, 2×3: big hours over violet minutes on a dark card. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_ink_card"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <TextClock
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:format12Hour="hh"
+        android:format24Hour="HH"
+        android:includeFontPadding="false"
+        android:textColor="#FFFFFFFF"
+        android:textSize="64sp"
+        android:textStyle="bold" />
+
+    <TextClock
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:format12Hour="mm"
+        android:format24Hour="mm"
+        android:includeFontPadding="false"
+        android:textColor="#FFA78BFA"
+        android:textSize="64sp"
+        android:textStyle="bold" />
+
+    <TextClock
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:format12Hour="EEE, d MMM"
+        android:format24Hour="EEE, d MMM"
+        android:letterSpacing="0.08"
+        android:maxLines="1"
+        android:textAllCaps="true"
+        android:textColor="#FFA1A1AA"
+        android:textSize="12sp"
+        android:textStyle="bold" />
+</LinearLayout>

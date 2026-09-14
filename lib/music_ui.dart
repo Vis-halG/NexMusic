@@ -1,6 +1,6 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
-import 'dart:ui' show ImageFilter;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:provider/provider.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
+import 'package:video_player/video_player.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import 'main.dart';
@@ -16,36 +17,19 @@ import 'music_controller.dart';
 import 'music_data.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Navigation helpers
+// Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-void _openPlayer(BuildContext context) {
-  Navigator.of(context).push(
-    PageRouteBuilder<void>(
-      pageBuilder: (_, _, _) => const NowPlayingScreen(),
-      transitionsBuilder: (_, animation, _, child) => SlideTransition(
-        position: Tween<Offset>(begin: const Offset(0, 1), end: Offset.zero)
-            .animate(
-              CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
-            ),
-        child: child,
-      ),
-      transitionDuration: const Duration(milliseconds: 380),
-    ),
-  );
-}
+bool get _webViewSupported =>
+    !kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS);
 
-void _openCollection(BuildContext context, MusicCollection collection) {
-  Navigator.of(context).push(
-    MaterialPageRoute<void>(
-      builder: (_) => CollectionScreen(collection: collection),
-    ),
-  );
-}
+/// Bumped when a home screen widget asks for the search bar.
+final _searchRequests = ValueNotifier<int>(0);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Utility functions
-// ─────────────────────────────────────────────────────────────────────────────
+Color _muted(BuildContext context) =>
+    Theme.of(context).colorScheme.onSurfaceVariant;
 
 String _time(Duration value) {
   final minutes = value.inMinutes;
@@ -53,92 +37,494 @@ String _time(Duration value) {
   return '$minutes:$seconds';
 }
 
-/// Time-aware greeting (fixes hardcoded "Good evening" bug).
-String _greeting() {
-  final hour = DateTime.now().hour;
-  if (hour < 12) return 'Good morning';
-  if (hour < 17) return 'Good afternoon';
-  return 'Good evening';
-}
+String _fileSize(int bytes) => bytes >= 1024 * 1024
+    ? '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB'
+    : '${(bytes / 1024).ceil()} KB';
+
+String _fileName(String filePath) => filePath.split(RegExp(r'[\\/]')).last;
 
 IconData _mediaIcon(SavedMedia item) => switch (item.kind) {
-  'audio' => Icons.audio_file_rounded,
-  'video' => Icons.video_file_rounded,
+  'audio' => Icons.music_note_rounded,
+  'video' => Icons.play_arrow_rounded,
   _ => Icons.link_rounded,
 };
 
 String _mediaSubtitle(MusicController music, SavedMedia item) {
-  if (item.kind == 'link') return 'Saved video link';
-  final type = item.kind == 'video'
-      ? 'Private cloud video'
-      : 'Private cloud audio';
-  return music.isDownloaded(item) ? '$type · Available offline' : type;
+  final type = switch (item.kind) {
+    'audio' => 'Audio',
+    'video' => 'Video',
+    _ => 'Link',
+  };
+  return music.isDownloaded(item) ? '$type · Offline' : type;
 }
 
-Future<void> _handleMediaAction(
-  BuildContext context,
-  SavedMedia item,
-  String action,
-) async {
+void _push(BuildContext context, Widget screen) {
+  Navigator.of(context).push<void>(MaterialPageRoute(builder: (_) => screen));
+}
+
+void _openSong(BuildContext context, Song song, {List<Song>? queue}) {
   final music = context.read<MusicController>();
-  if (action == 'download') {
-    await music.downloadMedia(item);
-  } else if (action == 'removeDownload') {
-    await music.removeDownload(item);
-  } else if (action == 'edit') {
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute(builder: (_) => SavedMediaEditorScreen(item: item)),
+  if (song.isVideo) {
+    _push(
+      context,
+      VideoScreen(song: song.copyWith(url: music.playableUrl(song))),
     );
-  } else if (action == 'delete') {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Delete this item?'),
-        content: Text(
-          item.storagePath == null
-              ? 'This saved link will be permanently removed.'
-              : 'Cloud file, metadata and its offline copy will be permanently removed.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed == true) await music.deleteMedia(item);
+    return;
   }
+  music.play(song, from: queue);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Aurora decoration helper
-// ─────────────────────────────────────────────────────────────────────────────
+void _openPlayer(BuildContext context) {
+  Navigator.of(context).push<void>(
+    MaterialPageRoute(
+      fullscreenDialog: true,
+      builder: (_) => const NowPlayingScreen(),
+    ),
+  );
+}
 
-class _AuroraBlob extends StatelessWidget {
-  const _AuroraBlob({required this.color, required this.size});
-  final Color color;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) => Container(
-    width: size,
-    height: size,
-    decoration: BoxDecoration(
-      shape: BoxShape.circle,
-      gradient: RadialGradient(
-        colors: [color.withValues(alpha: 0.35), Colors.transparent],
+Future<void> _sheet(
+  BuildContext context,
+  List<Widget> Function(BuildContext sheetContext) children, {
+  String? title,
+}) {
+  return showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    builder: (sheetContext) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (title != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ...children(sheetContext),
+          ],
+        ),
       ),
     ),
   );
 }
 
+Future<String?> _nameDialog(
+  BuildContext context, {
+  required String title,
+  required String action,
+  String? hint,
+  String? initialValue,
+}) async {
+  final result = await showDialog<String>(
+    context: context,
+    builder: (_) => _NameDialog(
+      title: title,
+      action: action,
+      hint: hint,
+      initialValue: initialValue,
+    ),
+  );
+  final trimmed = result?.trim();
+  return trimmed == null || trimmed.isEmpty ? null : trimmed;
+}
+
+Future<bool> _confirm(
+  BuildContext context, {
+  required String title,
+  required String body,
+  required String action,
+}) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text(title),
+      content: Text(body),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          style: TextButton.styleFrom(
+            foregroundColor: Theme.of(dialogContext).colorScheme.error,
+          ),
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: Text(action),
+        ),
+      ],
+    ),
+  );
+  return result ?? false;
+}
+
+Future<MusicCategory?> _createCategory(BuildContext context) async {
+  final music = context.read<MusicController>();
+  final name = await _nameDialog(
+    context,
+    title: 'New category',
+    action: 'Create',
+    hint: 'e.g. Bollywood',
+  );
+  if (name == null) return null;
+  return music.createCategory(name);
+}
+
+Future<MediaFolder?> _createFolder(BuildContext context) async {
+  final music = context.read<MusicController>();
+  final name = await _nameDialog(
+    context,
+    title: 'New folder',
+    action: 'Create',
+    hint: 'e.g. Workout clips',
+  );
+  if (name == null) return null;
+  return music.createMediaFolder(name);
+}
+
+/// Native Android helpers for trimming and extracting audio.
+const _mediaTools = MethodChannel('com.thenex.nexmusic/media_tools');
+
+bool get _canTrim => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+/// Opens the trim screen for an upload and applies the chosen range.
+Future<bool> _trimUpload(BuildContext context, UploadItem item) async {
+  final result = await Navigator.of(context)
+      .push<({String path, Duration start, Duration end})>(
+        MaterialPageRoute(
+          builder: (_) => TrimScreen(
+            source: item.original?.path ?? item.path,
+            title: item.title,
+            start: item.trimStart,
+            end: item.trimEnd,
+          ),
+        ),
+      );
+  if (result == null) return false;
+  final previousCopy = item.trimmed ? item.path : null;
+  item.applyTrim(
+    trimmedPath: result.path,
+    trimmedSize: File(result.path).lengthSync(),
+    start: result.start,
+    end: result.end,
+  );
+  if (previousCopy != null) discardTemporaryCopy(previousCopy);
+  return true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// WELCOME SCREEN
+// Shared widgets
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Rounded choice used for categories, folders and "new" actions.
+class _Pill extends StatelessWidget {
+  const _Pill({
+    required this.label,
+    required this.onTap,
+    this.selected = false,
+    this.icon,
+    this.onLongPress,
+  });
+  final String label;
+  final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+  final bool selected;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final foreground = selected ? scheme.surface : scheme.onSurface;
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: SizedBox(
+        height: 36,
+        child: Material(
+          color: selected ? scheme.onSurface : Colors.transparent,
+          shape: StadiumBorder(
+            side: BorderSide(
+              color: selected ? scheme.onSurface : scheme.outlineVariant,
+            ),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onTap,
+            onLongPress: onLongPress,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (icon != null) ...[
+                    Icon(icon, size: 16, color: foreground),
+                    const SizedBox(width: 4),
+                  ],
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 220),
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: foreground,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Required single choice (category or folder) with a trailing "new" pill.
+class _ChoicePicker extends StatelessWidget {
+  const _ChoicePicker({
+    required this.label,
+    required this.options,
+    required this.selectedId,
+    required this.onChanged,
+    required this.onCreate,
+    required this.createLabel,
+    this.onManage,
+  });
+  final String label, createLabel;
+  final List<({String id, String name})> options;
+  final String? selectedId;
+  final ValueChanged<String> onChanged;
+  final Future<String?> Function() onCreate;
+
+  /// Opens a screen to rename or delete the options, when set.
+  final VoidCallback? onManage;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(fontSize: 13, color: _muted(context)),
+            ),
+          ),
+          if (onManage != null)
+            TextButton.icon(
+              onPressed: onManage,
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+              icon: const Icon(Icons.edit_outlined, size: 16),
+              label: const Text('Edit', style: TextStyle(fontSize: 13)),
+            ),
+        ],
+      ),
+      SizedBox(height: onManage == null ? 10 : 2),
+      Wrap(
+        runSpacing: 8,
+        children: [
+          for (final option in options)
+            _Pill(
+              label: option.name,
+              selected: option.id == selectedId,
+              onTap: () => onChanged(option.id),
+            ),
+          _Pill(
+            icon: Icons.add_rounded,
+            label: createLabel,
+            onTap: () async {
+              final id = await onCreate();
+              if (id != null) onChanged(id);
+            },
+          ),
+        ],
+      ),
+    ],
+  );
+}
+
+class _Thumb extends StatelessWidget {
+  const _Thumb({required this.icon, this.active = false, this.size = 44});
+  final IconData icon;
+  final bool active;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: active
+            ? NexMusicApp.violet.withValues(alpha: 0.12)
+            : scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(size * 0.22),
+      ),
+      child: Icon(
+        icon,
+        size: size * 0.46,
+        color: active ? NexMusicApp.violet : scheme.onSurfaceVariant,
+      ),
+    );
+  }
+}
+
+class _Avatar extends StatelessWidget {
+  const _Avatar({required this.initials, this.size = 36});
+  final String initials;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return CircleAvatar(
+      radius: size / 2,
+      backgroundColor: scheme.surfaceContainer,
+      child: Text(
+        initials.isEmpty ? '?' : initials,
+        style: TextStyle(
+          fontSize: size * 0.36,
+          fontWeight: FontWeight.w600,
+          color: scheme.onSurface,
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyState extends StatelessWidget {
+  const _EmptyState({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+  });
+  final IconData icon;
+  final String title, subtitle;
+
+  @override
+  Widget build(BuildContext context) => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 36, color: _muted(context)),
+          const SizedBox(height: 14),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            subtitle,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: _muted(context), fontSize: 13, height: 1.4),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _NavRow extends StatelessWidget {
+  const _NavRow({
+    required this.icon,
+    required this.title,
+    required this.onTap,
+    this.trailing,
+    this.showChevron = true,
+  });
+  final IconData icon;
+  final String title;
+  final String? trailing;
+  final bool showChevron;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => ListTile(
+    leading: Icon(icon),
+    title: Text(title),
+    trailing: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (trailing != null)
+          Text(trailing!, style: TextStyle(color: _muted(context))),
+        if (showChevron)
+          Icon(Icons.chevron_right_rounded, color: _muted(context)),
+      ],
+    ),
+    onTap: onTap,
+  );
+}
+
+class _NameDialog extends StatefulWidget {
+  const _NameDialog({
+    required this.title,
+    required this.action,
+    this.hint,
+    this.initialValue,
+  });
+  final String title, action;
+  final String? hint, initialValue;
+
+  @override
+  State<_NameDialog> createState() => _NameDialogState();
+}
+
+class _NameDialogState extends State<_NameDialog> {
+  late final _controller = TextEditingController(text: widget.initialValue);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.title),
+    content: TextField(
+      controller: _controller,
+      autofocus: true,
+      textCapitalization: TextCapitalization.sentences,
+      decoration: InputDecoration(hintText: widget.hint),
+      onSubmitted: (value) => Navigator.pop(context, value),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      TextButton(
+        style: TextButton.styleFrom(foregroundColor: NexMusicApp.violet),
+        onPressed: () => Navigator.pop(context, _controller.text),
+        child: Text(widget.action),
+      ),
+    ],
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sign in
 // ─────────────────────────────────────────────────────────────────────────────
 
 class WelcomeScreen extends StatelessWidget {
@@ -146,256 +532,100 @@ class WelcomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final music = context.watch<MusicController>();
+    final state = context
+        .select<
+          MusicController,
+          ({bool loading, bool configured, String? notice})
+        >(
+          (music) => (
+            loading: music.loading,
+            configured: music.backendConfigured,
+            notice: music.notice,
+          ),
+        );
+    final music = context.read<MusicController>();
     return Scaffold(
-      body: Stack(
-        children: [
-          // Deep space gradient background
-          Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  Color(0xFF0A0612),
-                  Color(0xFF160A1E),
-                  Color(0xFF040408),
-                ],
-              ),
-            ),
-          ),
-          // Aurora blobs
-          const Positioned(
-            top: -80,
-            right: -60,
-            child: _AuroraBlob(color: NexMusicApp.violet, size: 300),
-          ),
-          const Positioned(
-            top: 80,
-            left: -80,
-            child: _AuroraBlob(color: NexMusicApp.flamingo, size: 250),
-          ),
-          const Positioned(
-            bottom: 80,
-            right: -40,
-            child: _AuroraBlob(color: NexMusicApp.violet, size: 200),
-          ),
-          SafeArea(
-            child: LayoutBuilder(
-              builder: (context, viewport) => SingleChildScrollView(
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(minHeight: viewport.maxHeight),
-                  child: IntrinsicHeight(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(26, 24, 26, 32),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const _Brand(light: true),
-                          const Spacer(),
-                          Center(
-                            child: SizedBox(
-                              width: 310,
-                              height: 310,
-                              child: Stack(
-                                alignment: Alignment.center,
-                                children: [
-                                  Container(
-                                    width: 275,
-                                    height: 275,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      gradient: const LinearGradient(
-                                        colors: [
-                                          NexMusicApp.flamingo,
-                                          NexMusicApp.violet,
-                                        ],
-                                      ),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: NexMusicApp.violet.withValues(
-                                            alpha: 0.55,
-                                          ),
-                                          blurRadius: 90,
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  const _VinylDisc(),
-                                  const Positioned(
-                                    right: 8,
-                                    top: 30,
-                                    child: _FloatingNote(
-                                      icon: Icons.music_note_rounded,
-                                    ),
-                                  ),
-                                  const Positioned(
-                                    left: 14,
-                                    bottom: 30,
-                                    child: _FloatingNote(
-                                      icon: Icons.graphic_eq_rounded,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          const Spacer(),
-                          const Text(
-                            'Your sound.\nYour moment.',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 44,
-                              height: 1.07,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: -0.8,
-                            ),
-                          ),
-                          const SizedBox(height: 14),
-                          Text(
-                            'Millions of moods, one beautiful place.\nDiscover what sounds like you.',
-                            style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.65),
-                              height: 1.55,
-                              fontSize: 15,
-                            ),
-                          ),
-                          const SizedBox(height: 34),
-                          SizedBox(
-                            width: double.infinity,
-                            height: 56,
-                            child: FilledButton.icon(
-                              onPressed: music.loading
-                                  ? null
-                                  : music.googlePreviewLogin,
-                              style: FilledButton.styleFrom(
-                                backgroundColor: Colors.white,
-                                foregroundColor: const Color(0xFF17131F),
-                                textStyle: const TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(18),
-                                ),
-                              ),
-                              icon: music.loading
-                                  ? const SizedBox.square(
-                                      dimension: 20,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2.5,
-                                      ),
-                                    )
-                                  : const _GoogleLogo(),
-                              label: const Text('Continue with Google'),
-                            ),
-                          ),
-                          if (music.notice != null) ...[
-                            const SizedBox(height: 12),
-                            Center(
-                              child: Text(
-                                music.notice!,
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                  color: Colors.white.withValues(alpha: 0.75),
-                                  fontSize: 12,
-                                  height: 1.45,
-                                ),
-                              ),
-                            ),
-                          ],
-                          const SizedBox(height: 8),
-                          Center(
-                            child: TextButton(
-                              onPressed: music.guestLogin,
-                              child: Text(
-                                'Explore preview →',
-                                style: TextStyle(
-                                  color: Colors.white.withValues(alpha: 0.7),
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 14,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Spacer(),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(14),
+                  child: Image.asset(
+                    'assets/branding/nexmusic-logo.png',
+                    width: 56,
+                    height: 56,
                   ),
                 ),
               ),
-            ),
+              const SizedBox(height: 24),
+              const Text(
+                'nexMusic',
+                style: TextStyle(
+                  fontSize: 32,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.6,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Upload songs and videos into categories.\nEveryone signed in can listen.',
+                style: TextStyle(
+                  fontSize: 15,
+                  height: 1.5,
+                  color: _muted(context),
+                ),
+              ),
+              const Spacer(),
+              // The snackbar host only exists after sign-in, so login errors
+              // are shown inline here.
+              if (state.notice != null) ...[
+                Text(
+                  state.notice!,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.error,
+                    fontSize: 13,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
+              OutlinedButton(
+                onPressed: state.loading || !state.configured
+                    ? null
+                    : music.signInWithGoogle,
+                child: state.loading
+                    ? const SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          _GoogleLogo(),
+                          SizedBox(width: 12),
+                          Text('Continue with Google'),
+                        ],
+                      ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
-}
-
-class _VinylDisc extends StatelessWidget {
-  const _VinylDisc();
-  @override
-  Widget build(BuildContext context) => Container(
-    width: 230,
-    height: 230,
-    decoration: BoxDecoration(
-      shape: BoxShape.circle,
-      gradient: const RadialGradient(
-        colors: [
-          Color(0xFFFF73AE),
-          Color(0xFFFF4F9A),
-          Color(0xFF2A173A),
-          Color(0xFF0C0C10),
-        ],
-        stops: [0, 0.13, 0.15, 1],
-      ),
-      border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
-    ),
-    child: CustomPaint(painter: _GroovePainter()),
-  );
-}
-
-class _GroovePainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.06)
-      ..style = PaintingStyle.stroke;
-    for (double r = 54; r < size.width / 2; r += 9) {
-      canvas.drawCircle(size.center(Offset.zero), r, paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-class _FloatingNote extends StatelessWidget {
-  const _FloatingNote({required this.icon});
-  final IconData icon;
-  @override
-  Widget build(BuildContext context) => ClipRRect(
-    borderRadius: BorderRadius.circular(20),
-    child: BackdropFilter(
-      filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.14),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
-        ),
-        child: Icon(icon, color: Colors.white, size: 25),
-      ),
-    ),
-  );
 }
 
 class _GoogleLogo extends StatelessWidget {
   const _GoogleLogo();
   @override
   Widget build(BuildContext context) => const SizedBox.square(
-    dimension: 24,
+    dimension: 20,
     child: CustomPaint(painter: _GoogleLogoPainter()),
   );
 }
@@ -443,7 +673,7 @@ class _GoogleLogoPainter extends CustomPainter {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// APP SHELL + NAVIGATION
+// Home: one screen with category pills and every upload
 // ─────────────────────────────────────────────────────────────────────────────
 
 class MusicShell extends StatefulWidget {
@@ -453,1754 +683,1636 @@ class MusicShell extends StatefulWidget {
 }
 
 class _MusicShellState extends State<MusicShell> {
-  int index = 0;
-  static const _pages = [
-    HomeScreen(),
-    SearchScreen(),
-    LibraryScreen(),
-    ProfileScreen(),
-  ];
   StreamSubscription<List<SharedMediaFile>>? _shareSubscription;
+  StreamSubscription<String>? _launchSubscription;
 
   @override
   void initState() {
     super.initState();
     if (kIsWeb) return;
-    _shareSubscription = ReceiveSharingIntent.instance.getMediaStream().listen(
-      _openSharedItems,
-    );
+    final phone = context.read<MusicController>().phone;
+    _launchSubscription = phone?.launchActions.listen(_runLaunchAction);
+    phone?.takeLaunchAction().then((action) {
+      if (action != null) _runLaunchAction(action);
+    });
+    _shareSubscription = ReceiveSharingIntent.instance
+        .getMediaStream()
+        .listen(_openSharedItems, onError: (Object _) {});
     ReceiveSharingIntent.instance.getInitialMedia().then((items) {
       _openSharedItems(items);
       ReceiveSharingIntent.instance.reset();
-    });
+    }, onError: (Object _) {});
   }
 
   void _openSharedItems(List<SharedMediaFile> items) {
     if (!mounted || items.isEmpty) return;
-    final item = items.first;
+    final media = [
+      for (final item in items)
+        if (item.type == SharedMediaType.video ||
+            item.type == SharedMediaType.file)
+          item.path,
+    ];
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      Navigator.of(context).push<void>(
-        MaterialPageRoute(
-          builder: (_) => SharedImportScreen(
-            source: item.path,
-            isLocalMedia:
-                item.type == SharedMediaType.video ||
-                item.type == SharedMediaType.file,
+      if (media.isEmpty) {
+        final youtube = youtubeLinkIn(items.first.path);
+        if (youtube != null && _webViewSupported) {
+          unawaited(_openConverterSearch(youtube));
+        } else {
+          _push(context, SharedImportScreen(source: items.first.path));
+        }
+        return;
+      }
+      _sheet(
+        context,
+        title: media.length == 1
+            ? 'Add shared file'
+            : 'Add ${media.length} shared files',
+        (sheetContext) => [
+          ListTile(
+            leading: const Icon(Icons.public_rounded),
+            title: const Text('Upload for everyone'),
+            subtitle: const Text('Choose a category and share it'),
+            onTap: () {
+              Navigator.pop(sheetContext);
+              _push(context, UploadScreen(initialPaths: media));
+            },
           ),
-        ),
+          if (media.length == 1)
+            ListTile(
+              leading: const Icon(Icons.lock_outline_rounded),
+              title: const Text('Keep privately'),
+              subtitle: const Text('Trim it or save the original for yourself'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _push(
+                  context,
+                  OwnedMediaEditorScreen(
+                    source: media.first,
+                    suggestedName: _fileName(media.first),
+                  ),
+                );
+              },
+            ),
+        ],
       );
     });
+  }
+
+  /// Runs a home screen widget tap. A song to play may still be loading from
+  /// the catalogue cache when the app has just started.
+  void _runLaunchAction(String action, [int attempt = 0]) {
+    if (!mounted) return;
+    final music = context.read<MusicController>();
+    if (action.startsWith('play:')) {
+      final song = music.songById(action.substring('play:'.length));
+      if (song != null) {
+        _openSong(context, song, queue: music.songs);
+      } else if (attempt < 10) {
+        Future<void>.delayed(
+          const Duration(milliseconds: 500),
+          () => _runLaunchAction(action, attempt + 1),
+        );
+      }
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      switch (action) {
+        case 'player':
+          if (music.current != null) _openPlayer(context);
+        case 'upload':
+          _push(context, const UploadScreen());
+        case 'search':
+          _searchRequests.value++;
+        case 'browser':
+          if (_webViewSupported) {
+            _push(context, const NexBrowserScreen(sharedLink: ''));
+          }
+        case 'downloads':
+          _push(
+            context,
+            SongListScreen(
+              title: 'Downloads',
+              emptyText:
+                  'Tap ⋮ on a song and choose Download to play it without internet.',
+              select: (music) => music.downloadedSongs,
+            ),
+          );
+      }
+    });
+  }
+
+  /// Copies a shared YouTube link and opens the in-app browser on a
+  /// "youtube to mp3" search, so the link can be pasted on the site chosen.
+  Future<void> _openConverterSearch(String link) async {
+    await Clipboard.setData(ClipboardData(text: link));
+    if (!mounted) return;
+    _push(context, const NexBrowserScreen(sharedLink: 'youtube to mp3'));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('YouTube link copied. Paste it on the site you open.'),
+      ),
+    );
   }
 
   @override
   void dispose() {
     _shareSubscription?.cancel();
+    _launchSubscription?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final shellState = context
-        .select<MusicController, ({String? notice, Track? current})>(
-          (music) => (notice: music.notice, current: music.current),
-        );
-    final music = context.read<MusicController>();
-    if (shellState.notice != null) {
+    final notice = context.select<MusicController, String?>(
+      (music) => music.notice,
+    );
+    if (notice != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || shellState.notice == null) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(shellState.notice!),
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-            ),
-          ),
-        );
+        if (!mounted) return;
+        final music = context.read<MusicController>();
+        final message = music.notice;
+        if (message == null) return;
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text(message)));
         music.clearNotice();
       });
     }
     return Scaffold(
-      extendBody: true,
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(child: _pages[index]),
-            if (shellState.current != null) const MiniPlayer(),
-          ],
-        ),
+      body: const SafeArea(bottom: false, child: _CatalogView()),
+      floatingActionButton: FloatingActionButton(
+        tooltip: 'Upload',
+        onPressed: () => _push(context, const UploadScreen()),
+        child: const Icon(Icons.add_rounded),
       ),
-      bottomNavigationBar: _MusicBottomNav(
-        currentIndex: index,
-        onChanged: (value) => setState(() => index = value),
-        items: const [
-          _MusicNavItem(
-            icon: Icons.home_outlined,
-            activeIcon: Icons.home_rounded,
-            label: 'Home',
-          ),
-          _MusicNavItem(
-            icon: Icons.search_outlined,
-            activeIcon: Icons.search_rounded,
-            label: 'Discover',
-          ),
-          _MusicNavItem(
-            icon: Icons.library_music_outlined,
-            activeIcon: Icons.library_music_rounded,
-            label: 'Library',
-          ),
-          _MusicNavItem(
-            icon: Icons.person_outline_rounded,
-            activeIcon: Icons.person_rounded,
-            label: 'You',
-          ),
-        ],
-      ),
+      bottomNavigationBar: const MiniPlayer(),
     );
   }
 }
 
-class _MusicNavItem {
-  const _MusicNavItem({
-    required this.icon,
-    required this.activeIcon,
-    required this.label,
-  });
-  final IconData icon, activeIcon;
-  final String label;
+class _CatalogView extends StatefulWidget {
+  const _CatalogView();
+
+  @override
+  State<_CatalogView> createState() => _CatalogViewState();
 }
 
-class _MusicBottomNav extends StatelessWidget {
-  const _MusicBottomNav({
-    required this.currentIndex,
-    required this.onChanged,
-    required this.items,
-  });
-  final int currentIndex;
-  final ValueChanged<int> onChanged;
-  final List<_MusicNavItem> items;
+class _CatalogViewState extends State<_CatalogView> {
+  final _search = TextEditingController();
+  String? _categoryId;
+  bool _searching = false;
 
-  static const _barHeight = 66.0;
-  static const _motion = Duration(milliseconds: 260);
-  static const _curve = Curves.easeOutCubic;
+  @override
+  void initState() {
+    super.initState();
+    _searchRequests.addListener(_openSearch);
+  }
+
+  void _openSearch() {
+    if (mounted) setState(() => _searching = true);
+  }
+
+  @override
+  void dispose() {
+    _searchRequests.removeListener(_openSearch);
+    _search.dispose();
+    super.dispose();
+  }
+
+  Future<void> _newCategory() async {
+    final category = await _createCategory(context);
+    if (!mounted || category == null) return;
+    setState(() => _categoryId = category.id);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    return SafeArea(
-      top: false,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 5, 12, 10),
-        child: Container(
-          height: _barHeight,
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
-          decoration: BoxDecoration(
-            color: scheme.surface.withValues(alpha: 0.98),
-            borderRadius: BorderRadius.circular(33),
-            border: Border.all(color: scheme.outlineVariant),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: dark ? 0.5 : 0.12),
-                blurRadius: 24,
-                offset: const Offset(0, 8),
+    final music = context.watch<MusicController>();
+    // A category deleted elsewhere falls back to "All".
+    final selected =
+        _categoryId != null && music.categoryById(_categoryId!) != null
+        ? _categoryId
+        : null;
+    final query = _search.text.trim().toLowerCase();
+    final visible = music
+        .songsIn(selected)
+        .where(
+          (song) =>
+              query.isEmpty ||
+              song.title.toLowerCase().contains(query) ||
+              music.categoryName(song.categoryId).toLowerCase().contains(query),
+        )
+        .toList();
+
+    return Column(
+      children: [
+        _searching ? _searchBar() : _header(music),
+        SizedBox(
+          height: 52,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.fromLTRB(20, 8, 12, 8),
+            children: [
+              _Pill(
+                label: 'All',
+                selected: selected == null,
+                onTap: () => setState(() => _categoryId = null),
               ),
+              for (final category in music.categories)
+                _Pill(
+                  label: category.name,
+                  selected: selected == category.id,
+                  onTap: () => setState(() => _categoryId = category.id),
+                  onLongPress: () => _categoryActions(context, category),
+                ),
+              _Pill(
+                icon: Icons.add_rounded,
+                label: 'Category',
+                onTap: _newCategory,
+              ),
+              if (music.categories.isNotEmpty)
+                _Pill(
+                  icon: Icons.edit_outlined,
+                  label: 'Edit',
+                  onTap: () => _push(context, const CategoryManagerScreen()),
+                ),
             ],
           ),
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              const gap = 5.0;
-              final count = items.length;
-              final available = constraints.maxWidth - gap * (count - 1);
-              final inactiveWidth = math.min(48.0, available / count);
-              final activeWidth = available - inactiveWidth * (count - 1);
-              return Stack(
+        ),
+        if (music.uploads.isNotEmpty)
+          InkWell(
+            onTap: () => _push(context, const UploadScreen()),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 2, 20, 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  AnimatedPositioned(
-                    duration: _motion,
-                    curve: _curve,
-                    left: currentIndex * (inactiveWidth + gap),
-                    top: 0,
-                    bottom: 0,
-                    width: activeWidth,
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(24),
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFF9D6FFF), Color(0xFF6D28D9)],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                      ),
-                    ),
+                  Text(
+                    music.uploading
+                        ? 'Uploading ${music.uploadsFinished} of ${music.uploads.length}'
+                        : 'Uploads finished · tap to review',
+                    style: TextStyle(color: _muted(context), fontSize: 12),
                   ),
-                  Row(
-                    children: [
-                      for (var i = 0; i < count; i++) ...[
-                        if (i > 0) const SizedBox(width: gap),
-                        _MusicDestination(
-                          item: items[i],
-                          selected: i == currentIndex,
-                          width: i == currentIndex
-                              ? activeWidth
-                              : inactiveWidth,
-                          onTap: () => onChanged(i),
-                        ),
-                      ],
-                    ],
+                  const SizedBox(height: 6),
+                  LinearProgressIndicator(
+                    value: music.uploadFraction,
+                    minHeight: 3,
                   ),
                 ],
-              );
-            },
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MusicDestination extends StatefulWidget {
-  const _MusicDestination({
-    required this.item,
-    required this.selected,
-    required this.width,
-    required this.onTap,
-  });
-  final _MusicNavItem item;
-  final bool selected;
-  final double width;
-  final VoidCallback onTap;
-
-  @override
-  State<_MusicDestination> createState() => _MusicDestinationState();
-}
-
-class _MusicDestinationState extends State<_MusicDestination> {
-  bool _pressed = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final showLabel = widget.selected && widget.width >= 90;
-    return Semantics(
-      selected: widget.selected,
-      button: true,
-      label: widget.item.label,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(30),
-        onHighlightChanged: (v) => setState(() => _pressed = v),
-        onTap: () {
-          if (!widget.selected) HapticFeedback.selectionClick();
-          widget.onTap();
-        },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 280),
-          curve: _MusicBottomNav._curve,
-          width: widget.width,
-          height: 48,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              AnimatedScale(
-                scale: _pressed ? 0.82 : 1,
-                duration: const Duration(milliseconds: 150),
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 180),
-                  child: Icon(
-                    widget.selected ? widget.item.activeIcon : widget.item.icon,
-                    key: ValueKey(widget.selected),
-                    size: 22,
-                    color: widget.selected
-                        ? Colors.white
-                        : scheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
-              if (showLabel) ...[
-                const SizedBox(width: 7),
-                Flexible(
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      widget.item.label,
-                      maxLines: 1,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 4),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HOME SCREEN
-// ─────────────────────────────────────────────────────────────────────────────
-
-class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final homeState = context
-        .select<
-          MusicController,
-          ({
-            String name,
-            String initials,
-            Track? current,
-            bool playing,
-            int liked,
-            int downloaded,
-            List<Track> recent,
-          })
-        >(
-          (music) => (
-            name: music.profileName,
-            initials: music.profileInitials,
-            current: music.current,
-            playing: music.playing,
-            liked: music.liked.length,
-            downloaded: music.offlinePaths.length,
-            recent: music.recentTracks,
-          ),
-        );
-    final firstName = homeState.name.split(RegExp(r'\s+')).first;
-
-    return CustomScrollView(
-      key: const PageStorageKey('home'),
-      slivers: [
-        // Aurora hero header
-        SliverToBoxAdapter(
-          child: _HomeHero(
-            greeting: _greeting(),
-            firstName: firstName,
-            initials: homeState.initials,
-            playing: homeState.playing,
-            current: homeState.current,
-          ),
-        ),
-        // Quick action pills
-        const SliverToBoxAdapter(child: SizedBox(height: 20)),
-        SliverToBoxAdapter(
-          child: _HomeQuickActions(
-            liked: homeState.liked,
-            downloaded: homeState.downloaded,
-          ),
-        ),
-        // Your Mixes — horizontal collection carousel
-        const SliverToBoxAdapter(child: _SectionTitle(title: 'Your Mixes')),
-        SliverToBoxAdapter(
-          child: SizedBox(
-            height: 218,
-            child: ListView.builder(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 18),
-              itemCount: collections.length,
-              itemBuilder: (_, i) =>
-                  _CollectionCard(collection: collections[i]),
-            ),
-          ),
-        ),
-        // Mood Stations — horizontal gradient cards
-        const SliverToBoxAdapter(child: _SectionTitle(title: 'Mood Stations')),
-        SliverToBoxAdapter(
-          child: SizedBox(
-            height: 112,
-            child: ListView.builder(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 18),
-              itemCount: moodStations.length,
-              itemBuilder: (_, i) => _MoodCard(station: moodStations[i]),
-            ),
-          ),
-        ),
-        const SliverToBoxAdapter(child: SizedBox(height: 4)),
-        // Pick up again — recent history
-        if (homeState.recent.isNotEmpty) ...[
-          const SliverToBoxAdapter(
-            child: _SectionTitle(title: 'Pick Up Again', compact: true),
-          ),
-          SliverList.builder(
-            itemCount: math.min(4, homeState.recent.length),
-            itemBuilder: (context, i) => Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              child: SongTile(
-                track: homeState.recent[i],
-                queue: homeState.recent,
               ),
             ),
           ),
-        ],
-        // Trending Now
-        const SliverToBoxAdapter(
-          child: _SectionTitle(title: 'Trending Now', compact: true),
-        ),
-        SliverList.builder(
-          itemCount: math.min(5, tracks.length),
-          itemBuilder: (context, i) => Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14),
-            child: SongTile(track: tracks[i], number: i + 1, queue: tracks),
-          ),
-        ),
-        const SliverToBoxAdapter(child: SizedBox(height: 28)),
+        Expanded(child: _list(music, visible, query)),
       ],
     );
   }
+
+  Widget _header(MusicController music) => Padding(
+    padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
+    child: Row(
+      children: [
+        const Expanded(
+          child: Text(
+            'nexMusic',
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.w700,
+              letterSpacing: -0.4,
+            ),
+          ),
+        ),
+        IconButton(
+          tooltip: 'Search',
+          onPressed: () => setState(() => _searching = true),
+          icon: const Icon(Icons.search_rounded),
+        ),
+        IconButton(
+          tooltip: 'Profile',
+          onPressed: () => _push(context, const ProfileScreen()),
+          icon: _Avatar(initials: music.profileInitials, size: 32),
+        ),
+      ],
+    ),
+  );
+
+  Widget _searchBar() => Padding(
+    padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
+    child: Row(
+      children: [
+        Expanded(
+          child: TextField(
+            controller: _search,
+            autofocus: true,
+            textInputAction: TextInputAction.search,
+            onChanged: (_) => setState(() {}),
+            decoration: const InputDecoration(
+              hintText: 'Search songs or categories',
+              prefixIcon: Icon(Icons.search_rounded),
+              isDense: true,
+            ),
+          ),
+        ),
+        IconButton(
+          tooltip: 'Close search',
+          onPressed: () => setState(() {
+            _searching = false;
+            _search.clear();
+          }),
+          icon: const Icon(Icons.close_rounded),
+        ),
+      ],
+    ),
+  );
+
+  Widget _list(MusicController music, List<Song> visible, String query) {
+    if (!music.catalogLoaded) {
+      return const Center(
+        child: SizedBox.square(
+          dimension: 22,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: music.refreshCatalog,
+      child: visible.isEmpty
+          ? ListView(
+              children: [
+                const SizedBox(height: 80),
+                _EmptyState(
+                  icon: query.isEmpty
+                      ? Icons.library_music_outlined
+                      : Icons.search_off_rounded,
+                  title: query.isEmpty ? 'No songs here yet' : 'Nothing found',
+                  subtitle: query.isEmpty
+                      ? 'Tap + to upload the first one.'
+                      : 'Try another word.',
+                ),
+              ],
+            )
+          : ListView.builder(
+              padding: const EdgeInsets.only(top: 4, bottom: 96),
+              itemCount: visible.length,
+              itemBuilder: (context, i) =>
+                  SongTile(song: visible[i], queue: visible),
+            ),
+    );
+  }
 }
 
-class _HomeHero extends StatelessWidget {
-  const _HomeHero({
-    required this.greeting,
-    required this.firstName,
-    required this.initials,
-    required this.playing,
-    required this.current,
-  });
-  final String greeting, firstName, initials;
-  final bool playing;
-  final Track? current;
+class SongTile extends StatelessWidget {
+  const SongTile({super.key, required this.song, required this.queue});
+  final Song song;
+  final List<Song> queue;
 
   @override
   Widget build(BuildContext context) {
-    final focus =
-        current ?? (tracks.isNotEmpty ? tracks[1 % tracks.length] : null);
-    return Container(
-      padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
-      decoration: const BoxDecoration(
-        color: NexMusicApp.violet,
-        borderRadius: BorderRadius.vertical(bottom: Radius.circular(28)),
+    final tile = context
+        .select<
+          MusicController,
+          ({
+            bool active,
+            bool playing,
+            String category,
+            bool offline,
+            double? download,
+          })
+        >(
+          (music) => (
+            active: music.current?.id == song.id,
+            playing: music.playing,
+            category: music.categoryName(song.categoryId),
+            offline: music.isSongDownloaded(song),
+            download: music.songDownloads[song.id],
+          ),
+        );
+    final download = tile.download;
+    final details = [
+      tile.category,
+      if (song.isVideo) 'Video',
+      if (download != null)
+        'Downloading ${(download * 100).round()}%'
+      else if (tile.offline)
+        'Offline',
+    ];
+    return ListTile(
+      contentPadding: const EdgeInsets.only(left: 20, right: 8),
+      leading: _Thumb(
+        active: tile.active,
+        icon: tile.active && tile.playing
+            ? Icons.graphic_eq_rounded
+            : song.isVideo
+            ? Icons.play_arrow_rounded
+            : Icons.music_note_rounded,
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Expanded(child: _Brand(light: true)),
-              CircleAvatar(
-                backgroundColor: Colors.white24,
-                child: Text(
-                  initials,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w700,
-                  ),
+      title: Text(
+        song.title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontWeight: FontWeight.w500,
+          color: tile.active ? NexMusicApp.violet : null,
+        ),
+      ),
+      subtitle: Text(
+        details.join(' · '),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(color: _muted(context), fontSize: 12),
+      ),
+      trailing: IconButton(
+        tooltip: 'More',
+        onPressed: () => _songActions(context, song),
+        icon: Icon(Icons.more_vert_rounded, color: _muted(context)),
+      ),
+      onTap: () => _openSong(context, song, queue: queue),
+    );
+  }
+}
+
+Future<void> _songActions(BuildContext context, Song song) {
+  final music = context.read<MusicController>();
+  final liked = music.isLiked(song);
+  final downloaded = music.isSongDownloaded(song);
+  final downloading = music.songDownloads.containsKey(song.id);
+  return _sheet(
+    context,
+    title: song.title,
+    (sheetContext) => [
+      ListTile(
+        leading: Icon(
+          liked ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+        ),
+        title: Text(liked ? 'Remove from liked' : 'Like'),
+        onTap: () {
+          Navigator.pop(sheetContext);
+          music.toggleLike(song);
+        },
+      ),
+      if (!kIsWeb)
+        ListTile(
+          enabled: !downloading,
+          leading: Icon(
+            downloaded ? Icons.offline_pin_rounded : Icons.download_rounded,
+          ),
+          title: Text(
+            downloading
+                ? 'Downloading…'
+                : downloaded
+                ? 'Remove download'
+                : 'Download',
+          ),
+          subtitle: downloaded || downloading
+              ? null
+              : const Text('Play it without internet'),
+          onTap: () {
+            Navigator.pop(sheetContext);
+            if (downloaded) {
+              music.removeSongDownload(song);
+            } else {
+              music.downloadSong(song);
+            }
+          },
+        ),
+      // Anyone signed in can edit or delete any upload.
+      ListTile(
+        leading: const Icon(Icons.edit_outlined),
+        title: const Text('Edit or move'),
+        subtitle: const Text('Change the title or category'),
+        onTap: () {
+          Navigator.pop(sheetContext);
+          _push(context, SongEditorScreen(song: song));
+        },
+      ),
+      ListTile(
+        leading: const Icon(Icons.delete_outline_rounded),
+        title: const Text('Delete'),
+        onTap: () async {
+          Navigator.pop(sheetContext);
+          final confirmed = await _confirm(
+            context,
+            title: 'Delete "${song.title}"?',
+            body: 'It will be removed for everyone.',
+            action: 'Delete',
+          );
+          if (confirmed) await music.deleteSong(song);
+        },
+      ),
+    ],
+  );
+}
+
+Future<void> _categoryActions(
+  BuildContext context,
+  MusicCategory category,
+) async {
+  final music = context.read<MusicController>();
+  if (!music.ownsCategory(category)) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Only the person who created a category can change it.'),
+      ),
+    );
+    return;
+  }
+  await _sheet(
+    context,
+    title: category.name,
+    (sheetContext) => [
+      ListTile(
+        leading: const Icon(Icons.edit_outlined),
+        title: const Text('Rename'),
+        onTap: () {
+          Navigator.pop(sheetContext);
+          _renameCategory(context, category);
+        },
+      ),
+      ListTile(
+        leading: const Icon(Icons.delete_outline_rounded),
+        title: const Text('Delete'),
+        onTap: () {
+          Navigator.pop(sheetContext);
+          _deleteCategory(context, category);
+        },
+      ),
+    ],
+  );
+}
+
+Future<void> _renameCategory(
+  BuildContext context,
+  MusicCategory category,
+) async {
+  final music = context.read<MusicController>();
+  final name = await _nameDialog(
+    context,
+    title: 'Rename category',
+    action: 'Save',
+    initialValue: category.name,
+  );
+  if (name != null) await music.renameCategory(category, name);
+}
+
+Future<void> _deleteCategory(
+  BuildContext context,
+  MusicCategory category,
+) async {
+  final music = context.read<MusicController>();
+  final count = music.songsIn(category.id).length;
+  final songs = '$count song${count == 1 ? '' : 's'}';
+  final confirmed = await _confirm(
+    context,
+    title: count == 0
+        ? 'Delete "${category.name}"?'
+        : 'Delete "${category.name}" and its $songs?',
+    body: count == 0
+        ? 'The category will be removed for everyone.'
+        : 'The category and all $songs in it will be removed for everyone. This cannot be undone.',
+    action: count == 0 ? 'Delete' : 'Delete all',
+  );
+  if (!confirmed || !context.mounted) return;
+  if (count > 0) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Deleting "${category.name}" and its $songs…')),
+    );
+  }
+  await music.deleteCategory(category, withSongs: count > 0);
+}
+
+/// Every category with its song count. Categories this user created can be
+/// renamed or deleted; the rest are read-only.
+class CategoryManagerScreen extends StatelessWidget {
+  const CategoryManagerScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final categories = context.watch<MusicController>().categories;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Categories'),
+        actions: [
+          IconButton(
+            tooltip: 'New category',
+            onPressed: () => _createCategory(context),
+            icon: const Icon(Icons.add_rounded),
+          ),
+          const SizedBox(width: 4),
+        ],
+      ),
+      body: categories.isEmpty
+          ? const _EmptyState(
+              icon: Icons.label_outline_rounded,
+              title: 'No categories yet',
+              subtitle: 'Tap + to create the first one.',
+            )
+          : ListView.builder(
+              padding: const EdgeInsets.only(top: 4, bottom: 24),
+              itemCount: categories.length,
+              itemBuilder: (_, i) => _CategoryRow(category: categories[i]),
+            ),
+    );
+  }
+}
+
+class _CategoryRow extends StatelessWidget {
+  const _CategoryRow({required this.category});
+  final MusicCategory category;
+
+  @override
+  Widget build(BuildContext context) {
+    final music = context.read<MusicController>();
+    final count = music.songsIn(category.id).length;
+    final owner = music.ownsCategory(category);
+    final songs = '$count song${count == 1 ? '' : 's'}';
+    return ListTile(
+      contentPadding: const EdgeInsets.only(left: 20, right: 8),
+      title: Text(
+        category.name,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontWeight: FontWeight.w500),
+      ),
+      subtitle: Text(
+        owner ? songs : '$songs · created by someone else',
+        style: TextStyle(color: _muted(context), fontSize: 12),
+      ),
+      trailing: owner
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  tooltip: 'Rename',
+                  onPressed: () => _renameCategory(context, category),
+                  icon: const Icon(Icons.edit_outlined),
                 ),
+                IconButton(
+                  tooltip: 'Delete',
+                  onPressed: () => _deleteCategory(context, category),
+                  icon: const Icon(Icons.delete_outline_rounded),
+                ),
+              ],
+            )
+          : Padding(
+              padding: const EdgeInsets.only(right: 12),
+              child: Icon(
+                Icons.lock_outline_rounded,
+                size: 18,
+                color: _muted(context),
+              ),
+            ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Upload & edit
+// ─────────────────────────────────────────────────────────────────────────────
+
+class UploadScreen extends StatefulWidget {
+  const UploadScreen({super.key, this.initialPaths = const []});
+  final List<String> initialPaths;
+
+  @override
+  State<UploadScreen> createState() => _UploadScreenState();
+}
+
+class _UploadScreenState extends State<UploadScreen> {
+  late final MusicController _music;
+  final _title = TextEditingController();
+  final List<UploadItem> _picked = [];
+  final List<String> _rejected = [];
+  String? _categoryId;
+  bool _rights = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _music = context.read<MusicController>();
+    for (final filePath in widget.initialPaths) {
+      final file = File(filePath);
+      _add(
+        filePath,
+        _fileName(filePath),
+        !kIsWeb && file.existsSync() ? file.lengthSync() : 0,
+      );
+    }
+    if (_picked.length == 1) _title.text = _picked.first.title;
+  }
+
+  @override
+  void dispose() {
+    // Picked files that were never uploaded leave copies in the cache. Clear
+    // them only when no upload batch still needs its files.
+    if (_picked.isNotEmpty && _music.uploads.isEmpty) {
+      for (final item in _picked) {
+        _music.discardPicked(item);
+      }
+      try {
+        unawaited(FilePicker.clearTemporaryFiles().catchError((Object _) {}));
+      } catch (_) {}
+    }
+    _title.dispose();
+    super.dispose();
+  }
+
+  /// Adds a picked file, or notes why it cannot be uploaded.
+  void _add(String filePath, String name, int sizeBytes) {
+    if (_picked.any((item) => item.path == filePath)) return;
+    final reason = uploadKindFor(name) == null
+        ? 'file type not supported'
+        : sizeBytes >= maxUploadBytes
+        ? 'larger than 100 MB'
+        // A size of -1 means the phone did not report one.
+        : sizeBytes == 0
+        ? 'empty or unreadable'
+        : null;
+    if (reason != null) {
+      _rejected.add('$name · $reason');
+      return;
+    }
+    final title = name.replaceAll(RegExp(r'\.[^.]+$'), '');
+    _picked.add(
+      UploadItem(
+        path: filePath,
+        name: name,
+        sizeBytes: sizeBytes,
+        title: title.length > 160 ? title.substring(0, 160) : title,
+      ),
+    );
+  }
+
+  static Future<int> _sizeOf(
+    int? Function() known,
+    Future<int> Function() read,
+  ) async {
+    try {
+      return known() ?? await read();
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<void> _pickFiles() async {
+    // Android: the native chooser returns content URIs and copies nothing, so
+    // choosing hundreds of songs does not fill the phone (file_picker copied
+    // every file up front and Android deleted some before they uploaded).
+    final chosen = await _music.phone?.pickMedia();
+    if (chosen != null) {
+      if (!mounted || chosen.isEmpty) return;
+      setState(() {
+        _rejected.clear();
+        for (final file in chosen) {
+          _add(file.uri, file.name, file.size);
+        }
+        if (_picked.length == 1) _title.text = _picked.first.title;
+      });
+      return;
+    }
+    // Elsewhere, filter by media type, not extension: file_picker turns
+    // extensions into exact MIME types (m4a → audio/mp4), and phones that
+    // label a file differently (audio/x-m4a) grey it out. _add rejects the
+    // rest.
+    final files = await FilePicker.pickFiles(type: FileType.media);
+    if (!mounted || files.isEmpty) return;
+    final sizes = await Future.wait([
+      for (final file in files) _sizeOf(file.lengthSync, file.length),
+    ]);
+    if (!mounted) return;
+    setState(() {
+      _rejected.clear();
+      for (var i = 0; i < files.length; i++) {
+        final filePath = files[i].path;
+        if (filePath == null) {
+          _rejected.add('${files[i].name} · could not be read');
+        } else {
+          _add(filePath, files[i].name, sizes[i]);
+        }
+      }
+      if (_picked.length == 1) _title.text = _picked.first.title;
+    });
+  }
+
+  void _remove(UploadItem item) => setState(() {
+    _music.discardPicked(item);
+    _picked.remove(item);
+    if (_picked.length == 1) _title.text = _picked.first.title;
+  });
+
+  void _clear() => setState(() {
+    for (final item in _picked) {
+      _music.discardPicked(item);
+    }
+    _picked.clear();
+    _rejected.clear();
+    _title.clear();
+  });
+
+  Future<void> _trim(UploadItem item) async {
+    if (_picked.length == 1) item.title = _title.text;
+    final trimmed = await _trimUpload(context, item);
+    if (trimmed && mounted) setState(() {});
+  }
+
+  void _undoTrim(UploadItem item) {
+    final trimmedCopy = item.undoTrim();
+    if (trimmedCopy != null) discardTemporaryCopy(trimmedCopy);
+    setState(() {});
+  }
+
+  void _upload() {
+    final categoryId = _categoryId;
+    if (categoryId == null || _picked.isEmpty) return;
+    if (_picked.length == 1) _picked.first.title = _title.text;
+    final items = List.of(_picked);
+    unawaited(_music.startUploads(items, categoryId: categoryId));
+    // The batch is queued synchronously; keep the selection if it was refused.
+    if (_music.uploads.isNotEmpty &&
+        identical(_music.uploads.first, items.first)) {
+      setState(() {
+        _picked.clear();
+        _rejected.clear();
+        _rights = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final music = context.watch<MusicController>();
+    return music.uploads.isEmpty
+        ? _pickerView(music)
+        : _progressView(music);
+  }
+
+  Widget _pickerView(MusicController music) {
+    final muted = _muted(context);
+    final error = Theme.of(context).colorScheme.error;
+    final count = _picked.length;
+    final totalBytes = _picked.fold<int>(0, (sum, item) => sum + item.sizeBytes);
+    final ready =
+        count > 0 &&
+        music.categories.any((category) => category.id == _categoryId) &&
+        _rights &&
+        (count > 1 || _title.text.trim().isNotEmpty);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Upload')),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
+        children: [
+          _FileBox(
+            title: count == 0
+                ? 'Choose songs or videos'
+                : '$count file${count == 1 ? '' : 's'} · ${_fileSize(totalBytes)}',
+            detail: count == 0
+                ? 'Pick one or many · up to 100 MB each'
+                : 'Tap to add more',
+            onTap: _pickFiles,
+            onClear: count == 0 ? null : _clear,
+          ),
+          for (final reason in _rejected)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(reason, style: TextStyle(color: error, fontSize: 12)),
+            ),
+          if (count == 1) ...[
+            const SizedBox(height: 20),
+            TextField(
+              controller: _title,
+              maxLength: 160,
+              onChanged: (_) => setState(() {}),
+              decoration: const InputDecoration(
+                labelText: 'Title',
+                counterText: '',
+              ),
+            ),
+            if (_canTrim && uploadKindFor(_picked.first.name) == 'audio') ...[
+              const SizedBox(height: 12),
+              _TrimRow(
+                item: _picked.first,
+                onTrim: () => _trim(_picked.first),
+                onUndo: () => _undoTrim(_picked.first),
               ),
             ],
-          ),
+          ] else if (count > 1) ...[
+            const SizedBox(height: 8),
+            for (final item in _picked.take(50))
+              _PickedRow(
+                item: item,
+                onRemove: () => _remove(item),
+                onTrim: _canTrim && uploadKindFor(item.name) == 'audio'
+                    ? () => _trim(item)
+                    : null,
+              ),
+            if (count > 50)
+              Text(
+                '+ ${count - 50} more',
+                style: TextStyle(color: muted, fontSize: 12),
+              ),
+            const SizedBox(height: 4),
+            Text(
+              'Titles come from the file names. You can edit them after uploading.',
+              style: TextStyle(color: muted, fontSize: 12),
+            ),
+          ],
           const SizedBox(height: 20),
-          Row(
+          _ChoicePicker(
+            label: 'Category',
+            options: [
+              for (final category in music.categories)
+                (id: category.id, name: category.name),
+            ],
+            selectedId: _categoryId,
+            onChanged: (id) => setState(() => _categoryId = id),
+            onCreate: () async => (await _createCategory(context))?.id,
+            createLabel: 'New category',
+            onManage: () => _push(context, const CategoryManagerScreen()),
+          ),
+          const SizedBox(height: 12),
+          CheckboxListTile(
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            value: _rights,
+            onChanged: (value) => setState(() => _rights = value ?? false),
+            title: const Text(
+              'I have the right to share this publicly',
+              style: TextStyle(fontSize: 14),
+            ),
+          ),
+          if (!music.uploadsConfigured)
+            Text(
+              'Uploads are not set up yet (Cloudinary).',
+              style: TextStyle(color: error, fontSize: 12),
+            ),
+          const SizedBox(height: 12),
+          FilledButton(
+            onPressed: ready ? _upload : null,
+            child: Text(count > 1 ? 'Upload $count files' : 'Upload'),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'Everyone signed in to nexMusic can play your uploads.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: muted, fontSize: 12),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _progressView(MusicController music) {
+    final uploads = music.uploads;
+    final uploading = music.uploading;
+    final failed = music.uploadsFailed;
+    int count(UploadStatus status) =>
+        uploads.where((item) => item.status == status).length;
+    final summary = [
+      '${count(UploadStatus.done)} uploaded',
+      if (count(UploadStatus.skipped) > 0)
+        '${count(UploadStatus.skipped)} already in nexMusic',
+      if (failed > 0) '$failed failed',
+    ].join(' · ');
+
+    return Scaffold(
+      appBar: AppBar(title: Text(uploading ? 'Uploading' : 'Upload finished')),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${music.uploadsFinished} of ${uploads.length} done',
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 8),
+                LinearProgressIndicator(
+                  value: music.uploadFraction,
+                  minHeight: 4,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  uploading
+                      ? 'Keep nexMusic open until the uploads finish.'
+                      : summary,
+                  style: TextStyle(color: _muted(context), fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          const Divider(),
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.only(bottom: 16),
+              itemCount: uploads.length,
+              itemBuilder: (_, i) => _UploadRow(item: uploads[i]),
+            ),
+          ),
+        ],
+      ),
+      // In the bottom bar, snackbars float above the buttons instead of
+      // covering them.
+      bottomNavigationBar: uploading
+          ? null
+          : SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                child: Row(
+                  children: [
+                    if (failed > 0) ...[
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: music.retryFailedUploads,
+                          child: Text('Retry failed ($failed)'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                    ],
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: () {
+                          music.clearUploads();
+                          Navigator.pop(context);
+                        },
+                        child: const Text('Done'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+    );
+  }
+}
+
+class _FileBox extends StatelessWidget {
+  const _FileBox({
+    required this.title,
+    required this.detail,
+    required this.onTap,
+    this.onClear,
+  });
+  final String title, detail;
+  final VoidCallback onTap;
+  final VoidCallback? onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surfaceContainer,
+      borderRadius: BorderRadius.circular(12),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 4, 12),
+          child: Row(
             children: [
+              Icon(
+                onClear == null
+                    ? Icons.upload_file_rounded
+                    : Icons.library_music_outlined,
+                color: scheme.onSurfaceVariant,
+              ),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '$greeting, $firstName',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
-                      ),
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w500),
                     ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      'Find your next favourite sound.',
-                      style: TextStyle(color: Colors.white70, fontSize: 13),
-                    ),
-                    const SizedBox(height: 16),
-                    FilledButton.icon(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        foregroundColor: NexMusicApp.violet,
-                        minimumSize: const Size(0, 48),
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                      ),
-                      onPressed: focus == null
-                          ? null
-                          : () {
-                              if (playing && current != null) {
-                                _openPlayer(context);
-                              } else {
-                                context.read<MusicController>().play(
-                                  focus,
-                                  from: tracks,
-                                );
-                              }
-                            },
-                      icon: Icon(
-                        playing
-                            ? Icons.graphic_eq_rounded
-                            : Icons.play_arrow_rounded,
-                      ),
-                      label: Text(
-                        playing ? 'Now playing' : 'Start smart mix',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                    const SizedBox(height: 2),
+                    Text(
+                      detail,
+                      maxLines: 2,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: scheme.onSurfaceVariant,
                       ),
                     ),
                   ],
                 ),
               ),
-              if (focus != null) ...[
+              if (onClear != null)
+                IconButton(
+                  tooltip: 'Clear selection',
+                  onPressed: onClear,
+                  icon: const Icon(Icons.close_rounded),
+                )
+              else
                 const SizedBox(width: 12),
-                Artwork(
-                  colors: focus.colors,
-                  seed: focus.id,
-                  size: 64,
-                  radius: 16,
-                ),
-              ],
             ],
           ),
-        ],
+        ),
       ),
     );
   }
 }
 
-class _HomeQuickActions extends StatelessWidget {
-  const _HomeQuickActions({required this.liked, required this.downloaded});
-  final int liked, downloaded;
+class _PickedRow extends StatelessWidget {
+  const _PickedRow({required this.item, required this.onRemove, this.onTrim});
+  final UploadItem item;
+  final VoidCallback onRemove;
+  final VoidCallback? onTrim;
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: 46,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 18),
-        children: [
-          _QuickPill(
-            icon: Icons.auto_awesome_rounded,
-            label: 'Smart Mix',
-            gradient: const LinearGradient(
-              colors: [Color(0xFF9D6FFF), Color(0xFF6D28D9)],
-            ),
-            onTap: () {
-              final shuffled = List<Track>.of(tracks)..shuffle();
-              if (shuffled.isEmpty) return;
-              context.read<MusicController>().play(
-                shuffled.first,
-                from: shuffled,
-              );
-            },
+    final start = item.trimStart, end = item.trimEnd;
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            item.name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 13),
           ),
-          const SizedBox(width: 10),
-          _QuickPill(
-            icon: Icons.favorite_rounded,
-            label: '$liked Liked',
-            gradient: const LinearGradient(
-              colors: [Color(0xFFB02D62), Color(0xFFFF91B9)],
-            ),
-            onTap: () => Navigator.push<void>(
-              context,
-              MaterialPageRoute(
-                builder: (_) => LikedSongsScreen(
-                  songs: context.read<MusicController>().likedTracks,
-                ),
-              ),
+        ),
+        Text(
+          start != null && end != null
+              ? '${_time(start)}–${_time(end)}'
+              : _fileSize(item.sizeBytes),
+          style: TextStyle(
+            color: item.trimmed ? NexMusicApp.violet : _muted(context),
+            fontSize: 12,
+          ),
+        ),
+        if (onTrim != null)
+          IconButton(
+            tooltip: item.trimmed ? 'Trim again' : 'Trim',
+            visualDensity: VisualDensity.compact,
+            onPressed: onTrim,
+            icon: Icon(
+              Icons.content_cut_rounded,
+              size: 18,
+              color: item.trimmed ? NexMusicApp.violet : null,
             ),
           ),
-          const SizedBox(width: 10),
-          _QuickPill(
-            icon: Icons.ios_share_rounded,
-            label: 'Import',
-            gradient: const LinearGradient(
-              colors: [Color(0xFF096A76), Color(0xFF36D1C4)],
-            ),
-            onTap: () => _showImportMenu(context),
-          ),
-          const SizedBox(width: 10),
-          _QuickPill(
-            icon: Icons.offline_pin_rounded,
-            label: '$downloaded Offline',
-            gradient: const LinearGradient(
-              colors: [Color(0xFF1B4FBF), Color(0xFF4A9DFF)],
-            ),
-            onTap: () => _simpleSheet(
-              context,
-              'Offline library',
-              '$downloaded imported items are available offline on this device.',
-            ),
-          ),
-        ],
-      ),
+        IconButton(
+          tooltip: 'Remove',
+          visualDensity: VisualDensity.compact,
+          onPressed: onRemove,
+          icon: const Icon(Icons.close_rounded, size: 18),
+        ),
+      ],
     );
   }
 }
 
-class _QuickPill extends StatelessWidget {
-  const _QuickPill({
-    required this.icon,
-    required this.label,
-    required this.gradient,
-    required this.onTap,
+class _TrimRow extends StatelessWidget {
+  const _TrimRow({
+    required this.item,
+    required this.onTrim,
+    required this.onUndo,
   });
-  final IconData icon;
-  final String label;
-  final LinearGradient gradient;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) => GestureDetector(
-    onTap: onTap,
-    child: Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      decoration: BoxDecoration(
-        gradient: gradient,
-        borderRadius: BorderRadius.circular(23),
-        boxShadow: [
-          BoxShadow(
-            color: gradient.colors.first.withValues(alpha: 0.32),
-            blurRadius: 12,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, color: Colors.white, size: 17),
-          const SizedBox(width: 7),
-          Text(
-            label,
-            style: const TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.w700,
-              fontSize: 13,
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-class _CollectionCard extends StatelessWidget {
-  const _CollectionCard({required this.collection});
-  final MusicCollection collection;
-
-  @override
-  Widget build(BuildContext context) => GestureDetector(
-    onTap: () => _openCollection(context, collection),
-    child: Container(
-      width: 155,
-      margin: const EdgeInsets.only(right: 14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Artwork(
-            colors: collection.colors,
-            seed: collection.id,
-            size: 155,
-            radius: 20,
-          ),
-          const SizedBox(height: 10),
-          Text(
-            collection.title,
-            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(height: 2),
-          Text(
-            collection.subtitle,
-            style: const TextStyle(color: Colors.grey, fontSize: 12),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-class _MoodCard extends StatelessWidget {
-  const _MoodCard({required this.station});
-  final MoodStation station;
+  final UploadItem item;
+  final VoidCallback onTrim, onUndo;
 
   @override
   Widget build(BuildContext context) {
-    final stTracks = stationTracks(station);
-    return GestureDetector(
-      onTap: () {
-        if (stTracks.isEmpty) return;
-        context.read<MusicController>().play(stTracks.first, from: stTracks);
-      },
-      child: Container(
-        width: 148,
-        margin: const EdgeInsets.only(right: 12),
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: station.colors,
+    final start = item.trimStart, end = item.trimEnd;
+    return Row(
+      children: [
+        Expanded(
+          child: OutlinedButton.icon(
+            onPressed: onTrim,
+            icon: const Icon(Icons.content_cut_rounded, size: 18),
+            label: Text(
+              start == null || end == null
+                  ? 'Trim audio'
+                  : 'Trimmed ${_time(start)} – ${_time(end)}',
+            ),
           ),
-          borderRadius: BorderRadius.circular(22),
-          boxShadow: [
-            BoxShadow(
-              color: station.colors.first.withValues(alpha: 0.32),
-              blurRadius: 16,
-              offset: const Offset(0, 7),
-            ),
-          ],
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.18),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Icon(station.icon, color: Colors.white, size: 20),
-            ),
-            const Spacer(),
-            Text(
-              station.title,
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w800,
-                fontSize: 13,
-              ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              station.subtitle,
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.7),
-                fontSize: 10,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
+        if (item.trimmed) ...[
+          const SizedBox(width: 8),
+          TextButton(onPressed: onUndo, child: const Text('Undo')),
+        ],
+      ],
+    );
+  }
+}
+
+class _UploadRow extends StatelessWidget {
+  const _UploadRow({required this.item});
+  final UploadItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final (Widget icon, String status) = switch (item.status) {
+      UploadStatus.queued => (
+        Icon(Icons.schedule_rounded, color: scheme.onSurfaceVariant),
+        'Waiting',
+      ),
+      UploadStatus.uploading => (
+        SizedBox.square(
+          dimension: 20,
+          child: CircularProgressIndicator(
+            strokeWidth: 2.5,
+            value: item.progress,
+          ),
+        ),
+        '${(item.progress * 100).round()}%',
+      ),
+      UploadStatus.done => (
+        const Icon(Icons.check_circle_rounded, color: NexMusicApp.violet),
+        'Uploaded',
+      ),
+      UploadStatus.skipped => (
+        Icon(Icons.remove_circle_outline_rounded, color: scheme.onSurfaceVariant),
+        'Already in nexMusic',
+      ),
+      UploadStatus.failed => (
+        Icon(Icons.error_outline_rounded, color: scheme.error),
+        'Failed · ${item.error ?? 'unknown error'}',
+      ),
+    };
+    return ListTile(
+      dense: true,
+      leading: SizedBox(width: 28, child: Center(child: icon)),
+      title: Text(item.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: Text(
+        '$status · ${_fileSize(item.sizeBytes)}',
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 12,
+          color: item.status == UploadStatus.failed
+              ? scheme.error
+              : scheme.onSurfaceVariant,
         ),
       ),
     );
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SEARCH SCREEN  (genre cards now filter tracks and navigate to genre screen)
-// ─────────────────────────────────────────────────────────────────────────────
+/// Picks the part of a song to keep: play it and tap "Start here" and
+/// "End here", or drag the handles.
+class TrimScreen extends StatefulWidget {
+  const TrimScreen({
+    super.key,
+    required this.source,
+    required this.title,
+    this.start,
+    this.end,
+  });
+  final String source, title;
+  final Duration? start, end;
 
-/// Deterministic genre → track ID mapping for filtering.
-const _genreTrackIds = <String, List<String>>{
-  'Indie': ['khwaab', 'slow', 'baarish'],
-  'Bollywood': ['baarish', 'safar', 'khwaab'],
-  'Chill': ['slow', 'khwaab', 'baarish'],
-  'Pop': ['midnight', 'higher', 'city'],
-  'Focus': ['orbit', 'slow', 'city'],
-  'Workout': ['higher', 'safar', 'midnight'],
-  'Party': ['higher', 'city', 'orbit'],
-  'Podcasts': ['midnight', 'orbit'],
-};
-
-class SearchScreen extends StatefulWidget {
-  const SearchScreen({super.key});
   @override
-  State<SearchScreen> createState() => _SearchScreenState();
+  State<TrimScreen> createState() => _TrimScreenState();
 }
 
-class _SearchScreenState extends State<SearchScreen> {
-  String _query = '';
-  final _controller = TextEditingController();
+class _TrimScreenState extends State<TrimScreen> {
+  static const _minimum = Duration(seconds: 1);
+  final _player = AudioPlayer();
+  StreamSubscription<Duration>? _positionSub;
+  StreamSubscription<PlayerState>? _stateSub;
+  Duration _duration = Duration.zero, _position = Duration.zero;
+  late Duration _start = widget.start ?? Duration.zero;
+  Duration? _end;
+  bool _playing = false, _saving = false;
+  String? _error;
+
+  Duration get _selectionEnd => _end ?? _duration;
+
+  @override
+  void initState() {
+    super.initState();
+    context.read<MusicController>().pauseAudio();
+    _positionSub = _player.positionStream.listen((position) {
+      if (!mounted) return;
+      // The preview stops at the end of the selection.
+      if (_player.playing && position >= _selectionEnd) _player.pause();
+      setState(() => _position = position);
+    });
+    _stateSub = _player.playerStateStream.listen((state) {
+      if (!mounted) return;
+      setState(
+        () => _playing =
+            state.playing &&
+            state.processingState != ProcessingState.completed,
+      );
+    });
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      // Files from the native chooser are content URIs, not paths.
+      final length = widget.source.startsWith('content://')
+          ? await _player.setUrl(widget.source)
+          : await _player.setFilePath(widget.source);
+      if (!mounted) return;
+      if (length == null || length <= _minimum) {
+        throw StateError('Unknown length');
+      }
+      final end = widget.end;
+      setState(() {
+        _duration = length;
+        _end = end != null && end <= length ? end : length;
+        if (_start + _minimum > _selectionEnd) _start = Duration.zero;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = 'This file could not be opened for trimming.');
+      }
+    }
+  }
+
+  Future<void> _togglePlay() async {
+    if (_player.playing) {
+      await _player.pause();
+      return;
+    }
+    if (_position < _start || _position >= _selectionEnd) {
+      await _player.seek(_start);
+    }
+    unawaited(_player.play());
+  }
+
+  void _setStart() {
+    final latest = _selectionEnd - _minimum;
+    setState(() => _start = _position > latest ? latest : _position);
+  }
+
+  void _setEnd() {
+    final earliest = _start + _minimum;
+    final value = _position < earliest ? earliest : _position;
+    setState(() => _end = value > _duration ? _duration : value);
+  }
+
+  Future<void> _save() async {
+    final end = _end;
+    if (end == null) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    await _player.pause();
+    try {
+      final path = await _mediaTools.invokeMethod<String>(
+        'extractAndTrimAudio',
+        {
+          'source': widget.source,
+          'startMs': _start.inMilliseconds,
+          'endMs': end.inMilliseconds,
+        },
+      );
+      if (path == null) throw StateError('No trimmed file');
+      if (!mounted) {
+        discardTemporaryCopy(path);
+        return;
+      }
+      Navigator.pop(context, (path: path, start: _start, end: end));
+    } catch (error) {
+      // The native reason ends up in logcat for debugging.
+      debugPrint('Trim failed: $error');
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _error =
+            'This phone could not trim this audio. Upload it without trimming instead.';
+      });
+    }
+  }
 
   @override
   void dispose() {
-    _controller.dispose();
+    _positionSub?.cancel();
+    _stateSub?.cancel();
+    _player.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final results = tracks
-        .where(
-          (t) => '${t.title} ${t.artist} ${t.album}'.toLowerCase().contains(
-            _query.toLowerCase(),
-          ),
-        )
-        .toList();
-
-    return CustomScrollView(
-      key: const PageStorageKey('search'),
-      slivers: [
-        SliverAppBar(
-          title: const Text('Discover'),
-          floating: true,
-          actions: [
-            IconButton(
-              onPressed: () {},
-              icon: const Icon(Icons.notifications_none_rounded),
-            ),
-            const SizedBox(width: 8),
-          ],
-        ),
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 18),
-          sliver: SliverToBoxAdapter(
-            child: TextField(
-              controller: _controller,
-              onChanged: (value) => setState(() => _query = value),
-              decoration: InputDecoration(
-                hintText: 'Search music',
-                isDense: true,
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 14,
-                ),
-                prefixIcon: const Icon(Icons.search_rounded, size: 20),
-                prefixIconConstraints: const BoxConstraints.tightFor(
-                  width: 40,
-                  height: 48,
-                ),
-                suffixIconConstraints: const BoxConstraints.tightFor(
-                  width: 40,
-                  height: 48,
-                ),
-                suffixIcon: _query.isNotEmpty
-                    ? IconButton(
-                        iconSize: 20,
-                        icon: const Icon(Icons.clear_rounded),
-                        onPressed: () {
-                          _controller.clear();
-                          setState(() => _query = '');
-                        },
-                      )
-                    : const Icon(Icons.mic_none_rounded, size: 20),
-              ),
-            ),
-          ),
-        ),
-        if (_query.isEmpty) ...[
-          const SliverToBoxAdapter(
-            child: _SectionTitle(title: 'Browse all', compact: true),
-          ),
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(20, 6, 20, 26),
-            sliver: SliverGrid.builder(
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                childAspectRatio: 1.65,
-                crossAxisSpacing: 12,
-                mainAxisSpacing: 12,
-              ),
-              itemCount: _genres.length,
-              itemBuilder: (_, i) => _GenreCard(data: _genres[i]),
-            ),
-          ),
-          const SliverToBoxAdapter(
-            child: _SectionTitle(title: 'Popular right now', compact: true),
-          ),
-          SliverList.builder(
-            itemCount: math.min(4, tracks.length),
-            itemBuilder: (context, i) {
-              final idx = i + 1 < tracks.length ? i + 1 : i;
-              return Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 14),
-                child: SongTile(track: tracks[idx], queue: tracks),
-              );
-            },
-          ),
-          const SliverToBoxAdapter(child: SizedBox(height: 28)),
-        ] else ...[
-          SliverToBoxAdapter(
-            child: _SectionTitle(
-              title:
-                  '${results.length} result${results.length == 1 ? '' : 's'}',
-              compact: true,
-            ),
-          ),
-          if (results.isEmpty)
-            const SliverFillRemaining(
-              hasScrollBody: false,
-              child: _EmptyState(
-                icon: Icons.search_off_rounded,
-                title: 'Nothing found',
-                subtitle: 'Try another artist, song or album name.',
-              ),
-            )
-          else
-            SliverList.builder(
-              itemCount: results.length,
-              itemBuilder: (context, i) => Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 14),
-                child: SongTile(track: results[i], queue: results),
-              ),
-            ),
-          const SliverToBoxAdapter(child: SizedBox(height: 28)),
-        ],
-      ],
-    );
-  }
-}
-
-const _genres = [
-  ('Indie', Color(0xFFB94A60), Icons.auto_awesome_rounded),
-  ('Bollywood', Color(0xFFE37B35), Icons.local_fire_department_rounded),
-  ('Chill', Color(0xFF2A7C77), Icons.spa_rounded),
-  ('Pop', Color(0xFF7457D9), Icons.star_rounded),
-  ('Focus', Color(0xFF315C9E), Icons.psychology_rounded),
-  ('Workout', Color(0xFF42793D), Icons.fitness_center_rounded),
-  ('Party', Color(0xFFC13F91), Icons.celebration_rounded),
-  ('Podcasts', Color(0xFF93633E), Icons.podcasts_rounded),
-];
-
-class _GenreCard extends StatelessWidget {
-  const _GenreCard({required this.data});
-  final (String, Color, IconData) data;
-
-  @override
-  Widget build(BuildContext context) => InkWell(
-    onTap: () {
-      final genreName = data.$1;
-      final ids = _genreTrackIds[genreName] ?? [];
-      // Build genre tracks list; fall back to all tracks if IDs don't match yet
-      final genreTracks = ids.isEmpty
-          ? tracks
-          : ids
-                .map(
-                  (id) => tracks.cast<Track?>().firstWhere(
-                    (t) => t?.id == id,
-                    orElse: () => null,
-                  ),
-                )
-                .whereType<Track>()
-                .toList();
-      final display = genreTracks.isEmpty ? tracks : genreTracks;
-      Navigator.of(context).push<void>(
-        MaterialPageRoute(
-          builder: (_) => GenreTracksScreen(
-            genre: genreName,
-            color: data.$2,
-            icon: data.$3,
-            genreTracks: display,
-          ),
-        ),
-      );
-    },
-    borderRadius: BorderRadius.circular(19),
-    child: Container(
-      padding: const EdgeInsets.all(15),
-      decoration: BoxDecoration(
-        color: data.$2,
-        borderRadius: BorderRadius.circular(19),
-      ),
-      child: Stack(
-        children: [
-          Positioned(
-            bottom: -6,
-            right: -6,
-            child: Transform.rotate(
-              angle: -0.18,
-              child: Icon(
-                data.$3,
-                size: 56,
-                color: Colors.white.withValues(alpha: 0.2),
-              ),
-            ),
-          ),
-          Text(
-            data.$1,
-            style: const TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.w800,
-              fontSize: 17,
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-/// Dedicated screen showing tracks filtered by genre.
-class GenreTracksScreen extends StatelessWidget {
-  const GenreTracksScreen({
-    super.key,
-    required this.genre,
-    required this.color,
-    required this.icon,
-    required this.genreTracks,
-  });
-  final String genre;
-  final Color color;
-  final IconData icon;
-  final List<Track> genreTracks;
-
-  @override
-  Widget build(BuildContext context) {
+    final muted = _muted(context);
+    final ready = _end != null;
+    final end = _selectionEnd;
+    final small = TextStyle(color: muted, fontSize: 12);
     return Scaffold(
-      body: CustomScrollView(
-        slivers: [
-          SliverAppBar(
-            expandedHeight: 200,
-            pinned: true,
-            stretch: true,
-            flexibleSpace: FlexibleSpaceBar(
-              background: Container(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [color, color.withValues(alpha: 0.55)],
-                  ),
-                ),
-                child: Center(
-                  child: Icon(
-                    icon,
-                    color: Colors.white.withValues(alpha: 0.28),
-                    size: 100,
-                  ),
-                ),
-              ),
-              title: Text(
-                genre,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
+      appBar: AppBar(
+        title: const Text('Trim'),
+        actions: [
+          if (ready)
+            TextButton(
+              onPressed: _saving
+                  ? null
+                  : () => setState(() {
+                      _start = Duration.zero;
+                      _end = _duration;
+                    }),
+              child: const Text('Reset'),
+            ),
+          const SizedBox(width: 8),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+        children: [
+          Text(
+            widget.title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            _error ??
+                (ready
+                    ? 'Keeping ${_time(_start)} – ${_time(end)} · ${_time(end - _start)} long'
+                    : 'Loading…'),
+            style: TextStyle(
+              color: _error == null
+                  ? muted
+                  : Theme.of(context).colorScheme.error,
+              fontSize: 13,
             ),
           ),
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(18, 12, 18, 4),
-            sliver: SliverToBoxAdapter(
+          if (ready) ...[
+            const SizedBox(height: 28),
+            RangeSlider(
+              values: RangeValues(
+                _start.inMilliseconds.toDouble(),
+                end.inMilliseconds.toDouble(),
+              ),
+              max: math.max(1, _duration.inMilliseconds).toDouble(),
+              onChanged: _saving
+                  ? null
+                  : (values) {
+                      if (values.end - values.start <
+                          _minimum.inMilliseconds) {
+                        return;
+                      }
+                      setState(() {
+                        _start = Duration(milliseconds: values.start.round());
+                        _end = Duration(milliseconds: values.end.round());
+                      });
+                    },
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
               child: Row(
                 children: [
-                  Text(
-                    '${genreTracks.length} tracks',
-                    style: const TextStyle(
-                      color: Colors.grey,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
+                  Text(_time(_start), style: small),
                   const Spacer(),
-                  FilledButton.icon(
-                    onPressed: () {
-                      final shuffled = List<Track>.of(genreTracks)..shuffle();
-                      if (shuffled.isEmpty) return;
-                      context.read<MusicController>().play(
-                        shuffled.first,
-                        from: shuffled,
-                      );
-                    },
-                    icon: const Icon(Icons.shuffle_rounded, size: 18),
-                    label: const Text('Shuffle'),
-                    style: FilledButton.styleFrom(backgroundColor: color),
-                  ),
+                  Text('Now ${_time(_position)}', style: small),
+                  const Spacer(),
+                  Text(_time(end), style: small),
                 ],
               ),
             ),
-          ),
-          SliverList.builder(
-            itemCount: genreTracks.length,
-            itemBuilder: (context, i) => Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              child: SongTile(
-                track: genreTracks[i],
-                number: i + 1,
-                queue: genreTracks,
+            const SizedBox(height: 28),
+            Center(
+              child: SizedBox.square(
+                dimension: 72,
+                child: IconButton.filled(
+                  tooltip: _playing ? 'Pause' : 'Play selection',
+                  iconSize: 36,
+                  style: IconButton.styleFrom(
+                    backgroundColor: NexMusicApp.violet,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: _saving ? null : _togglePlay,
+                  icon: Icon(
+                    _playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                  ),
+                ),
               ),
             ),
-          ),
-          const SliverToBoxAdapter(child: SizedBox(height: 28)),
+            const SizedBox(height: 28),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: _saving ? null : _setStart,
+                    child: const Text('Start here'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: _saving ? null : _setEnd,
+                    child: const Text('End here'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Play the song and tap Start here and End here, or drag the handles.',
+              textAlign: TextAlign.center,
+              style: small,
+            ),
+          ],
         ],
+      ),
+      bottomNavigationBar: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+          child: FilledButton(
+            onPressed: ready && !_saving ? _save : null,
+            child: Text(_saving ? 'Trimming…' : 'Use this part'),
+          ),
+        ),
       ),
     );
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// LIBRARY SCREEN  (filter chips now actually filter content)
-// ─────────────────────────────────────────────────────────────────────────────
+class SongEditorScreen extends StatefulWidget {
+  const SongEditorScreen({super.key, required this.song});
+  final Song song;
 
-class LibraryScreen extends StatefulWidget {
-  const LibraryScreen({super.key});
   @override
-  State<LibraryScreen> createState() => _LibraryScreenState();
+  State<SongEditorScreen> createState() => _SongEditorScreenState();
 }
 
-class _LibraryScreenState extends State<LibraryScreen> {
-  int _filter = 0; // 0=All  1=Playlists  2=Songs  3=Downloaded
-
-  static const _filterLabels = ['All', 'Playlists', 'Songs', 'Downloaded'];
+class _SongEditorScreenState extends State<SongEditorScreen> {
+  late final _title = TextEditingController(text: widget.song.title);
+  late String _categoryId = widget.song.categoryId;
+  bool _saving = false;
 
   @override
-  Widget build(BuildContext context) {
-    final libraryState = context
-        .select<
-          MusicController,
-          ({
-            bool configured,
-            List<SavedMedia> saved,
-            int likedCount,
-            List<Track> likedTracks,
-            int offlineRevision,
-          })
-        >(
-          (music) => (
-            configured: music.backendConfigured,
-            saved: music.savedMedia,
-            likedCount: music.liked.length,
-            likedTracks: music.likedTracks,
-            offlineRevision: Object.hashAllUnordered(music.offlinePaths.keys),
-          ),
-        );
-    final music = context.read<MusicController>();
-
-    final visibleImports = _filter == 3
-        ? libraryState.saved.where(music.isDownloaded).toList()
-        : libraryState.saved;
-
-    final showLiked = _filter == 0 || _filter == 2;
-    final showPlaylists = _filter == 0 || _filter == 1;
-    final showImports = _filter == 0 || _filter == 3;
-
-    return CustomScrollView(
-      key: const PageStorageKey('library'),
-      slivers: [
-        SliverAppBar(
-          title: const Text('Your Library'),
-          floating: true,
-          actions: [
-            IconButton(
-              onPressed: () => _showImportMenu(context),
-              icon: const Icon(Icons.add_circle_outline_rounded),
-            ),
-            const SizedBox(width: 8),
-          ],
-        ),
-        const SliverToBoxAdapter(child: SizedBox(height: 16)),
-        // Filter chips
-        SliverToBoxAdapter(
-          child: SizedBox(
-            height: 44,
-            child: ListView.separated(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              scrollDirection: Axis.horizontal,
-              itemCount: _filterLabels.length,
-              separatorBuilder: (_, _) => const SizedBox(width: 8),
-              itemBuilder: (_, i) => ChoiceChip(
-                label: Text(_filterLabels[i]),
-                selected: _filter == i,
-                onSelected: (_) => setState(() => _filter = i),
-                selectedColor: NexMusicApp.violet.withValues(alpha: 0.16),
-                checkmarkColor: NexMusicApp.violet,
-                labelStyle: TextStyle(
-                  color: _filter == i ? NexMusicApp.violet : null,
-                  fontWeight: _filter == i ? FontWeight.w700 : FontWeight.w500,
-                ),
-              ),
-            ),
-          ),
-        ),
-        const SliverToBoxAdapter(child: SizedBox(height: 14)),
-        // Import banner
-        if (showImports)
-          SliverToBoxAdapter(
-            child: _ImportBanner(
-              configured: libraryState.configured,
-              onTap: () => _showImportMenu(context),
-            ),
-          ),
-        // Liked songs
-        if (showLiked)
-          SliverToBoxAdapter(
-            child: _LibraryTile(
-              icon: Icons.favorite_rounded,
-              colors: const [Color(0xFF7050ED), Color(0xFFFF76B3)],
-              title: 'Liked Songs',
-              subtitle: '${libraryState.likedCount} songs',
-              onTap: () => Navigator.push<void>(
-                context,
-                MaterialPageRoute(
-                  builder: (_) =>
-                      LikedSongsScreen(songs: libraryState.likedTracks),
-                ),
-              ),
-            ),
-          ),
-        // Playlists
-        if (showPlaylists) ...[
-          const SliverToBoxAdapter(
-            child: _SectionTitle(title: 'Playlists', compact: true),
-          ),
-          SliverList.builder(
-            itemCount: collections.length,
-            itemBuilder: (context, i) {
-              final item = collections[i];
-              return ListTile(
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 20,
-                  vertical: 5,
-                ),
-                leading: Artwork(
-                  colors: item.colors,
-                  seed: item.id,
-                  size: 60,
-                  radius: 15,
-                ),
-                title: Text(
-                  item.title,
-                  style: const TextStyle(fontWeight: FontWeight.w600),
-                ),
-                subtitle: Text(
-                  'Playlist · ${item.subtitle}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () => _openCollection(context, item),
-              );
-            },
-          ),
-        ],
-        // Recently played (All only)
-        if (_filter == 0)
-          SliverToBoxAdapter(
-            child: _LibraryTile(
-              icon: Icons.history_rounded,
-              colors: const [Color(0xFF18766F), Color(0xFF5FE0B8)],
-              title: 'Recently Played',
-              subtitle: 'Your listening history',
-              onTap: () {
-                if (collections.isNotEmpty) {
-                  _openCollection(context, collections.first);
-                }
-              },
-            ),
-          ),
-        // Saved imports
-        if (showImports && visibleImports.isNotEmpty) ...[
-          const SliverToBoxAdapter(
-            child: _SectionTitle(title: 'Saved imports', compact: true),
-          ),
-          SliverList.builder(
-            itemCount: visibleImports.length,
-            itemBuilder: (context, i) {
-              final item = visibleImports[i];
-              return ListTile(
-                contentPadding: const EdgeInsets.symmetric(horizontal: 20),
-                leading: CircleAvatar(
-                  backgroundColor: NexMusicApp.violet.withValues(alpha: 0.14),
-                  child: Icon(_mediaIcon(item), color: NexMusicApp.violet),
-                ),
-                title: Text(
-                  item.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontWeight: FontWeight.w600),
-                ),
-                subtitle: Text(
-                  _mediaSubtitle(music, item),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                trailing: PopupMenuButton<String>(
-                  onSelected: (action) =>
-                      _handleMediaAction(context, item, action),
-                  itemBuilder: (_) => [
-                    const PopupMenuItem(
-                      value: 'edit',
-                      child: ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: Icon(Icons.edit_outlined),
-                        title: Text('Edit details'),
-                      ),
-                    ),
-                    if (item.storagePath != null && !music.isDownloaded(item))
-                      const PopupMenuItem(
-                        value: 'download',
-                        child: ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: Icon(Icons.download_rounded),
-                          title: Text('Download offline'),
-                        ),
-                      ),
-                    if (music.isDownloaded(item))
-                      const PopupMenuItem(
-                        value: 'removeDownload',
-                        child: ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: Icon(Icons.offline_pin_outlined),
-                          title: Text('Remove offline copy'),
-                        ),
-                      ),
-                    const PopupMenuItem(
-                      value: 'delete',
-                      child: ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: Icon(Icons.delete_outline_rounded),
-                        title: Text('Delete permanently'),
-                      ),
-                    ),
-                  ],
-                ),
-                onTap: () {
-                  if (item.sourceUrl == null) {
-                    _simpleSheet(
-                      context,
-                      item.title,
-                      'Stored privately in Firebase Storage.',
-                    );
-                    return;
-                  }
-                  Navigator.push<void>(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) =>
-                          NexBrowserScreen(sharedLink: item.sourceUrl!),
-                    ),
-                  );
-                },
-              );
-            },
-          ),
-        ],
-        const SliverToBoxAdapter(child: SizedBox(height: 28)),
-      ],
-    );
+  void dispose() {
+    _title.dispose();
+    super.dispose();
   }
-}
 
-class _ImportBanner extends StatelessWidget {
-  const _ImportBanner({required this.configured, required this.onTap});
-  final bool configured;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(20, 2, 20, 14),
-    child: InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(23),
-      child: Ink(
-        padding: const EdgeInsets.all(18),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [NexMusicApp.violet, Color(0xFFC64FAD)],
-          ),
-          borderRadius: BorderRadius.circular(23),
-        ),
-        child: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.18),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: const Icon(Icons.ios_share_rounded, color: Colors.white),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Import to nexMusic',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    configured
-                        ? 'Links or your own media · Firebase ready'
-                        : 'Preview mode · Google login to upload',
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.72),
-                      fontSize: 11,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const Icon(Icons.arrow_forward_rounded, color: Colors.white),
-          ],
-        ),
-      ),
-    ),
-  );
-}
-
-class _LibraryTile extends StatelessWidget {
-  const _LibraryTile({
-    required this.icon,
-    required this.colors,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-  });
-  final IconData icon;
-  final List<Color> colors;
-  final String title, subtitle;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) => ListTile(
-    contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
-    leading: Container(
-      width: 62,
-      height: 62,
-      decoration: BoxDecoration(
-        gradient: LinearGradient(colors: colors),
-        borderRadius: BorderRadius.circular(15),
-      ),
-      child: Icon(icon, color: Colors.white),
-    ),
-    title: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
-    subtitle: Text(subtitle),
-    trailing: const Icon(Icons.chevron_right_rounded),
-    onTap: onTap,
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PROFILE SCREEN
-// ─────────────────────────────────────────────────────────────────────────────
-
-class ProfileScreen extends StatelessWidget {
-  const ProfileScreen({super.key});
+  Future<void> _save() async {
+    final music = context.read<MusicController>();
+    setState(() => _saving = true);
+    final saved = await music.updateSong(
+      widget.song,
+      title: _title.text,
+      categoryId: _categoryId,
+    );
+    if (!mounted) return;
+    setState(() => _saving = false);
+    if (saved) Navigator.pop(context);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final profile = context
-        .select<
-          MusicController,
-          ({
-            String initials,
-            String name,
-            String email,
-            int likedCount,
-            bool darkMode,
-            int downloadCount,
-          })
-        >(
-          (music) => (
-            initials: music.profileInitials,
-            name: music.profileName,
-            email: music.profileEmail,
-            likedCount: music.liked.length,
-            darkMode: music.darkMode,
-            downloadCount: music.offlinePaths.length,
+    final categories = context.select<MusicController, List<MusicCategory>>(
+      (music) => music.categories,
+    );
+    final valid =
+        _title.text.trim().isNotEmpty &&
+        categories.any((category) => category.id == _categoryId);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Edit song')),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
+        children: [
+          TextField(
+            controller: _title,
+            maxLength: 160,
+            onChanged: (_) => setState(() {}),
+            decoration: const InputDecoration(
+              labelText: 'Title',
+              counterText: '',
+            ),
           ),
-        );
-    final music = context.read<MusicController>();
-
-    return CustomScrollView(
-      key: const PageStorageKey('profile'),
-      slivers: [
-        // Aurora profile header
-        SliverToBoxAdapter(
-          child: Stack(
-            children: [
-              Container(
-                height: 190,
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: const [Color(0xFF7C3AED), Color(0xFF6D28D9)],
-                  ),
-                ),
-              ),
-              const Positioned(
-                top: -50,
-                right: -40,
-                child: _AuroraBlob(color: NexMusicApp.violet, size: 200),
-              ),
-              const Positioned(
-                top: 40,
-                left: -60,
-                child: _AuroraBlob(color: NexMusicApp.flamingo, size: 180),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(22, 32, 22, 26),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 82,
-                      height: 82,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFF9D6FFF), Color(0xFF6D28D9)],
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: NexMusicApp.violet.withValues(alpha: 0.45),
-                            blurRadius: 22,
-                          ),
-                        ],
-                      ),
-                      child: Center(
-                        child: Text(
-                          profile.initials,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 26,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 18),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            profile.name,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 22,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            profile.email,
-                            style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.62),
-                              fontSize: 13,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: () => _simpleSheet(
-                        context,
-                        'Edit profile',
-                        'Name and photo are synced from Firebase Google Auth.',
-                      ),
-                      icon: const Icon(
-                        Icons.edit_outlined,
-                        color: Colors.white60,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+          const SizedBox(height: 20),
+          _ChoicePicker(
+            label: 'Category',
+            options: [
+              for (final category in categories)
+                (id: category.id, name: category.name),
             ],
+            selectedId: _categoryId,
+            onChanged: (id) => setState(() => _categoryId = id),
+            onCreate: () async => (await _createCategory(context))?.id,
+            createLabel: 'New category',
+            onManage: () => _push(context, const CategoryManagerScreen()),
           ),
-        ),
-        // Stats card
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-            child: Card(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 20),
-                child: Row(
-                  children: [
-                    const Expanded(
-                      child: _Stat(value: '12', label: 'Playlists'),
-                    ),
-                    Expanded(
-                      child: _Stat(
-                        value: '${profile.likedCount}',
-                        label: 'Liked',
-                      ),
-                    ),
-                    const Expanded(
-                      child: _Stat(value: '8h', label: 'This week'),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+          const SizedBox(height: 24),
+          FilledButton(
+            onPressed: valid && !_saving ? _save : null,
+            child: Text(_saving ? 'Saving…' : 'Save'),
           ),
-        ),
-        const SliverToBoxAdapter(child: SizedBox(height: 22)),
-        const SliverToBoxAdapter(child: _SettingHeader('Preferences')),
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: Card(
-              child: Column(
-                children: [
-                  SwitchListTile(
-                    value: profile.darkMode,
-                    onChanged: music.setDarkMode,
-                    secondary: const Icon(Icons.dark_mode_outlined),
-                    title: const Text(
-                      'Dark mode',
-                      style: TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                  ),
-                  const Divider(height: 1, indent: 56),
-                  ListTile(
-                    leading: const Icon(Icons.high_quality_outlined),
-                    title: const Text(
-                      'Audio quality',
-                      style: TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                    subtitle: const Text('High'),
-                    trailing: const Icon(Icons.chevron_right_rounded),
-                    onTap: () => _simpleSheet(
-                      context,
-                      'Audio quality',
-                      'Automatic · Data saver · High · Lossless',
-                    ),
-                  ),
-                  const Divider(height: 1, indent: 56),
-                  ListTile(
-                    leading: const Icon(Icons.download_outlined),
-                    title: Text(
-                      'Downloads (${profile.downloadCount})',
-                      style: const TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                    trailing: const Icon(Icons.chevron_right_rounded),
-                    onTap: () => _simpleSheet(
-                      context,
-                      'Downloads',
-                      '${profile.downloadCount} file(s) are stored privately inside nexMusic on this device.',
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-        const SliverToBoxAdapter(child: SizedBox(height: 18)),
-        const SliverToBoxAdapter(child: _SettingHeader('Account')),
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: Card(
-              child: Column(
-                children: [
-                  ListTile(
-                    leading: const Icon(Icons.notifications_none_rounded),
-                    title: const Text(
-                      'Notifications',
-                      style: TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                    trailing: const Icon(Icons.chevron_right_rounded),
-                    onTap: () => _simpleSheet(
-                      context,
-                      'Notifications',
-                      'Choose new release and playlist alerts.',
-                    ),
-                  ),
-                  const Divider(height: 1, indent: 56),
-                  ListTile(
-                    leading: const Icon(Icons.info_outline_rounded),
-                    title: const Text(
-                      'About nexMusic',
-                      style: TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                    subtitle: const Text('Version 0.1.0'),
-                    onTap: () => showAboutDialog(
-                      context: context,
-                      applicationName: 'nexMusic',
-                      applicationVersion: '0.1.0',
-                      applicationIcon: ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: Image.asset(
-                          'assets/branding/nexmusic-logo.png',
-                          width: 64,
-                          height: 64,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 24, 20, 16),
-            child: OutlinedButton.icon(
-              onPressed: music.signOut,
-              icon: const Icon(Icons.logout_rounded),
-              label: const Text('Sign out'),
-              style: OutlinedButton.styleFrom(
-                minimumSize: const Size.fromHeight(52),
-                foregroundColor: Colors.redAccent,
-                side: BorderSide(
-                  color: Colors.redAccent.withValues(alpha: 0.35),
-                ),
-              ),
-            ),
-          ),
-        ),
-        const SliverToBoxAdapter(
-          child: Padding(
-            padding: EdgeInsets.only(bottom: 28),
-            child: Center(
-              child: Text(
-                'Made with rhythm by TheNex',
-                style: TextStyle(color: Colors.grey, fontSize: 12),
-              ),
-            ),
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
 
-class _Stat extends StatelessWidget {
-  const _Stat({required this.value, required this.label});
-  final String value, label;
-
-  @override
-  Widget build(BuildContext context) => Column(
-    children: [
-      Text(
-        value,
-        style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
-      ),
-      const SizedBox(height: 2),
-      Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12)),
-    ],
-  );
-}
-
-class _SettingHeader extends StatelessWidget {
-  const _SettingHeader(this.text);
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(24, 0, 24, 9),
-    child: Text(
-      text.toUpperCase(),
-      style: const TextStyle(
-        color: Colors.grey,
-        fontSize: 11,
-        fontWeight: FontWeight.w700,
-        letterSpacing: 1.2,
-      ),
-    ),
-  );
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-// MINI PLAYER  (glassmorphism + gradient progress + like button)
+// Players
 // ─────────────────────────────────────────────────────────────────────────────
 
 class MiniPlayer extends StatelessWidget {
@@ -2208,1061 +2320,977 @@ class MiniPlayer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final music = context.watch<MusicController>();
-    final track = music.current!;
-    final max = math.max(1, music.duration.inMilliseconds).toDouble();
-    final dark = Theme.of(context).brightness == Brightness.dark;
-
-    return ClipRect(
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-        child: Container(
-          decoration: BoxDecoration(
-            color: dark
-                ? const Color(0xFF1A1A20).withValues(alpha: 0.90)
-                : Colors.white.withValues(alpha: 0.88),
-            border: Border(
-              top: BorderSide(
-                color: dark
-                    ? Colors.white.withValues(alpha: 0.08)
-                    : Colors.black.withValues(alpha: 0.06),
-              ),
-            ),
+    final state = context
+        .select<
+          MusicController,
+          ({
+            Song? song,
+            bool playing,
+            bool loading,
+            Duration duration,
+            String category,
+          })
+        >(
+          (music) => (
+            song: music.current,
+            playing: music.playing,
+            loading: music.loading,
+            duration: music.duration,
+            category: music.current == null || music.current!.isPrivate
+                ? 'Private library'
+                : music.categoryName(music.current!.categoryId),
           ),
-          child: InkWell(
-            onTap: () => _openPlayer(context),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // Gradient progress bar at top
-                RepaintBoundary(
-                  child: ValueListenableBuilder<Duration>(
-                    valueListenable: music.positionListenable,
-                    builder: (context, position, _) {
-                      final ratio = (position.inMilliseconds / max).clamp(
-                        0.0,
-                        1.0,
-                      );
-                      return Stack(
+        );
+    final song = state.song;
+    if (song == null) return const SizedBox.shrink();
+    final music = context.read<MusicController>();
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surface,
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ValueListenableBuilder<Duration>(
+              valueListenable: music.positionListenable,
+              builder: (_, position, _) {
+                final total = state.duration.inMilliseconds;
+                final value = total <= 0
+                    ? 0.0
+                    : (position.inMilliseconds / total).clamp(0.0, 1.0);
+                return LinearProgressIndicator(
+                  value: value,
+                  minHeight: 2,
+                  backgroundColor: scheme.outlineVariant,
+                );
+              },
+            ),
+            InkWell(
+              onTap: () => _openPlayer(context),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 6, 8, 6),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          Container(height: 2.5, color: Colors.transparent),
-                          FractionallySizedBox(
-                            widthFactor: ratio,
-                            child: Container(
-                              height: 2.5,
-                              decoration: const BoxDecoration(
-                                gradient: LinearGradient(
-                                  colors: [
-                                    NexMusicApp.violet,
-                                    NexMusicApp.flamingo,
-                                  ],
-                                ),
-                              ),
+                          Text(
+                            song.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontWeight: FontWeight.w500),
+                          ),
+                          Text(
+                            state.category,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: scheme.onSurfaceVariant,
+                              fontSize: 12,
                             ),
                           ),
                         ],
-                      );
-                    },
-                  ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: state.playing ? 'Pause' : 'Play',
+                      onPressed: music.togglePlay,
+                      icon: state.loading
+                          ? const SizedBox.square(
+                              dimension: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : Icon(
+                              state.playing
+                                  ? Icons.pause_rounded
+                                  : Icons.play_arrow_rounded,
+                            ),
+                    ),
+                    IconButton(
+                      tooltip: 'Next',
+                      onPressed: music.next,
+                      icon: const Icon(Icons.skip_next_rounded),
+                    ),
+                  ],
                 ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 8, 8, 10),
-                  child: Row(
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class NowPlayingScreen extends StatelessWidget {
+  const NowPlayingScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context
+        .select<
+          MusicController,
+          ({
+            Song? song,
+            bool playing,
+            bool loading,
+            bool shuffle,
+            bool repeat,
+            bool liked,
+            Duration duration,
+            String category,
+          })
+        >((music) {
+          final song = music.current;
+          return (
+            song: song,
+            playing: music.playing,
+            loading: music.loading,
+            shuffle: music.shuffle,
+            repeat: music.repeat,
+            liked: song != null && music.isLiked(song),
+            duration: music.duration,
+            category: song == null || song.isPrivate
+                ? 'Private library'
+                : music.categoryName(song.categoryId),
+          );
+        });
+    final music = context.read<MusicController>();
+    final song = state.song;
+    final muted = _muted(context);
+
+    return Scaffold(
+      appBar: AppBar(
+        leading: IconButton(
+          tooltip: 'Close',
+          onPressed: () => Navigator.pop(context),
+          icon: const Icon(Icons.keyboard_arrow_down_rounded),
+        ),
+        centerTitle: true,
+        title: Text(
+          'Now playing',
+          style: TextStyle(fontSize: 14, color: muted),
+        ),
+      ),
+      body: song == null
+          ? const _EmptyState(
+              icon: Icons.music_off_rounded,
+              title: 'Nothing playing',
+              subtitle: 'Pick a song to start listening.',
+            )
+          : SafeArea(
+              top: false,
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final art = math
+                      .min(
+                        constraints.maxWidth - 48,
+                        constraints.maxHeight * 0.4,
+                      )
+                      .clamp(96.0, 340.0);
+                  return SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        minHeight: math.max(0, constraints.maxHeight - 32),
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          _Thumb(icon: Icons.music_note_rounded, size: art),
+                          const SizedBox(height: 32),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      song.title,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontSize: 22,
+                                        fontWeight: FontWeight.w600,
+                                        letterSpacing: -0.3,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      state.category,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(color: muted),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (!song.isPrivate)
+                                IconButton(
+                                  tooltip: state.liked ? 'Unlike' : 'Like',
+                                  onPressed: () => music.toggleLike(song),
+                                  icon: Icon(
+                                    state.liked
+                                        ? Icons.favorite_rounded
+                                        : Icons.favorite_border_rounded,
+                                    color: state.liked
+                                        ? NexMusicApp.violet
+                                        : null,
+                                  ),
+                                ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          ValueListenableBuilder<Duration>(
+                            valueListenable: music.positionListenable,
+                            builder: (context, position, _) {
+                              final max = math
+                                  .max(1, state.duration.inMilliseconds)
+                                  .toDouble();
+                              final value = position.inMilliseconds
+                                  .clamp(0, max.toInt())
+                                  .toDouble();
+                              return Column(
+                                children: [
+                                  SliderTheme(
+                                    data: SliderTheme.of(context).copyWith(
+                                      overlayShape:
+                                          SliderComponentShape.noOverlay,
+                                    ),
+                                    child: Slider(
+                                      value: value,
+                                      max: max,
+                                      onChanged: (next) => music.seek(
+                                        Duration(milliseconds: next.round()),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Row(
+                                    children: [
+                                      Text(
+                                        _time(position),
+                                        style: TextStyle(
+                                          color: muted,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                      const Spacer(),
+                                      Text(
+                                        _time(state.duration),
+                                        style: TextStyle(
+                                          color: muted,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              );
+                            },
+                          ),
+                          const SizedBox(height: 16),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              IconButton(
+                                tooltip: 'Shuffle',
+                                onPressed: music.toggleShuffle,
+                                icon: Icon(
+                                  Icons.shuffle_rounded,
+                                  color: state.shuffle
+                                      ? NexMusicApp.violet
+                                      : muted,
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'Previous',
+                                iconSize: 32,
+                                onPressed: music.previous,
+                                icon: const Icon(Icons.skip_previous_rounded),
+                              ),
+                              SizedBox.square(
+                                dimension: 64,
+                                child: IconButton.filled(
+                                  tooltip: state.playing ? 'Pause' : 'Play',
+                                  iconSize: 32,
+                                  style: IconButton.styleFrom(
+                                    backgroundColor: NexMusicApp.violet,
+                                    foregroundColor: Colors.white,
+                                  ),
+                                  onPressed: music.togglePlay,
+                                  icon: state.loading
+                                      ? const SizedBox.square(
+                                          dimension: 24,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Colors.white,
+                                          ),
+                                        )
+                                      : Icon(
+                                          state.playing
+                                              ? Icons.pause_rounded
+                                              : Icons.play_arrow_rounded,
+                                        ),
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'Next',
+                                iconSize: 32,
+                                onPressed: music.next,
+                                icon: const Icon(Icons.skip_next_rounded),
+                              ),
+                              IconButton(
+                                tooltip: 'Repeat',
+                                onPressed: music.toggleRepeat,
+                                icon: Icon(
+                                  state.repeat
+                                      ? Icons.repeat_one_rounded
+                                      : Icons.repeat_rounded,
+                                  color: state.repeat
+                                      ? NexMusicApp.violet
+                                      : muted,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+    );
+  }
+}
+
+class VideoScreen extends StatefulWidget {
+  const VideoScreen({super.key, required this.song});
+  final Song song;
+
+  @override
+  State<VideoScreen> createState() => _VideoScreenState();
+}
+
+class _VideoScreenState extends State<VideoScreen> {
+  late final VideoPlayerController _video;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    context.read<MusicController>().pauseAudio();
+    final url = widget.song.url;
+    _video = url.startsWith('file:')
+        ? VideoPlayerController.file(File.fromUri(Uri.parse(url)))
+        : VideoPlayerController.networkUrl(Uri.parse(url));
+    _video.addListener(_refresh);
+    // Streaming formats are not bundled with the app, see isStreamingLink.
+    _failed = isStreamingLink(url);
+    if (!_failed) _start();
+  }
+
+  Future<void> _start() async {
+    try {
+      await _video.initialize();
+      await _video.play();
+    } catch (_) {
+      if (mounted) setState(() => _failed = true);
+    }
+  }
+
+  void _refresh() {
+    if (mounted) setState(() {});
+  }
+
+  void _toggle() => _video.value.isPlaying ? _video.pause() : _video.play();
+
+  @override
+  void dispose() {
+    _video.removeListener(_refresh);
+    _video.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final value = _video.value;
+    final failed = _failed || value.hasError;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        title: Text(
+          widget.song.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 16,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: Center(
+                child: failed
+                    ? const Text(
+                        'This video could not be played.',
+                        style: TextStyle(color: Colors.white70),
+                      )
+                    : !value.isInitialized
+                    ? const SizedBox.square(
+                        dimension: 24,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : GestureDetector(
+                        onTap: _toggle,
+                        child: AspectRatio(
+                          aspectRatio: value.aspectRatio,
+                          child: Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              VideoPlayer(_video),
+                              if (!value.isPlaying)
+                                const Icon(
+                                  Icons.play_arrow_rounded,
+                                  size: 64,
+                                  color: Colors.white70,
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+              ),
+            ),
+            if (value.isInitialized && !failed)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 4, 16, 12),
+                child: Row(
+                  children: [
+                    IconButton(
+                      tooltip: value.isPlaying ? 'Pause' : 'Play',
+                      color: Colors.white,
+                      onPressed: _toggle,
+                      icon: Icon(
+                        value.isPlaying
+                            ? Icons.pause_rounded
+                            : Icons.play_arrow_rounded,
+                      ),
+                    ),
+                    Expanded(
+                      child: VideoProgressIndicator(
+                        _video,
+                        allowScrubbing: true,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        colors: const VideoProgressColors(
+                          playedColor: NexMusicApp.violet,
+                          bufferedColor: Colors.white24,
+                          backgroundColor: Colors.white12,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      '${_time(value.position)} / ${_time(value.duration)}',
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Profile & lists
+// ─────────────────────────────────────────────────────────────────────────────
+
+class ProfileScreen extends StatelessWidget {
+  const ProfileScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final music = context.watch<MusicController>();
+    return Scaffold(
+      appBar: AppBar(title: const Text('You')),
+      body: ListView(
+        padding: const EdgeInsets.only(bottom: 32),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
+            child: Row(
+              children: [
+                _Avatar(initials: music.profileInitials, size: 52),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Artwork(
-                        colors: track.colors,
-                        seed: track.id,
-                        size: 48,
-                        radius: 12,
-                        hero: 'art-${track.id}',
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              track.title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w700,
-                                fontSize: 14,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              track.artist,
-                              maxLines: 1,
-                              style: const TextStyle(
-                                color: Colors.grey,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ],
+                      Text(
+                        music.profileName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
-                      // Like button inline in mini player
-                      Builder(
-                        builder: (ctx) {
-                          final liked = context.select<MusicController, bool>(
-                            (m) => m.isLiked(track),
-                          );
-                          return IconButton(
-                            onPressed: () => music.toggleLike(track),
-                            icon: Icon(
-                              liked
-                                  ? Icons.favorite_rounded
-                                  : Icons.favorite_border_rounded,
-                              color: liked ? const Color(0xFFFF4F9A) : null,
-                              size: 20,
-                            ),
-                          );
-                        },
-                      ),
-                      if (music.loading)
-                        const Padding(
-                          padding: EdgeInsets.all(12),
-                          child: SizedBox.square(
-                            dimension: 22,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        )
-                      else
-                        IconButton(
-                          onPressed: music.togglePlay,
-                          icon: Icon(
-                            music.playing
-                                ? Icons.pause_rounded
-                                : Icons.play_arrow_rounded,
-                          ),
+                      if (music.profileEmail.isNotEmpty)
+                        Text(
+                          music.profileEmail,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: _muted(context), fontSize: 13),
                         ),
-                      IconButton(
-                        onPressed: music.next,
-                        icon: const Icon(Icons.skip_next_rounded),
-                      ),
                     ],
                   ),
                 ),
               ],
             ),
           ),
-        ),
+          const Divider(),
+          _NavRow(
+            icon: Icons.cloud_upload_outlined,
+            title: 'My uploads',
+            trailing: '${music.myUploads.length}',
+            onTap: () => _push(
+              context,
+              SongListScreen(
+                title: 'My uploads',
+                emptyText: 'Songs and videos you upload show up here.',
+                select: (music) => music.myUploads,
+              ),
+            ),
+          ),
+          _NavRow(
+            icon: Icons.favorite_border_rounded,
+            title: 'Liked',
+            trailing: '${music.likedSongs.length}',
+            onTap: () => _push(
+              context,
+              SongListScreen(
+                title: 'Liked',
+                emptyText: 'Tap ⋮ on any song and choose Like.',
+                select: (music) => music.likedSongs,
+              ),
+            ),
+          ),
+          _NavRow(
+            icon: Icons.history_rounded,
+            title: 'Recently played',
+            onTap: () => _push(
+              context,
+              SongListScreen(
+                title: 'Recently played',
+                emptyText: 'Songs you play show up here.',
+                select: (music) => music.recentSongs,
+              ),
+            ),
+          ),
+          if (!kIsWeb)
+            _NavRow(
+              icon: Icons.download_done_rounded,
+              title: 'Downloads',
+              trailing: '${music.downloadedSongs.length}',
+              onTap: () => _push(
+                context,
+                SongListScreen(
+                  title: 'Downloads',
+                  emptyText:
+                      'Tap ⋮ on a song and choose Download to play it without internet.',
+                  select: (music) => music.downloadedSongs,
+                ),
+              ),
+            ),
+          const Divider(),
+          _NavRow(
+            icon: Icons.lock_outline_rounded,
+            title: 'Private library',
+            trailing: '${music.savedMedia.length}',
+            onTap: () => _push(context, const PrivateLibraryScreen()),
+          ),
+          if (_webViewSupported)
+            _NavRow(
+              icon: Icons.language_rounded,
+              title: 'Browser',
+              onTap: () =>
+                  _push(context, const NexBrowserScreen(sharedLink: '')),
+            ),
+          const Divider(),
+          if (music.phone != null)
+            SwitchListTile(
+              secondary: const Icon(Icons.notifications_outlined),
+              title: const Text('Activity notifications'),
+              subtitle: const Text('When someone uploads, edits or deletes'),
+              value: music.pushEnabled,
+              onChanged: music.setPushEnabled,
+            ),
+          SwitchListTile(
+            secondary: const Icon(Icons.dark_mode_outlined),
+            title: const Text('Dark mode'),
+            value: music.darkMode,
+            onChanged: music.setDarkMode,
+          ),
+          _NavRow(
+            icon: Icons.logout_rounded,
+            title: 'Sign out',
+            showChevron: false,
+            onTap: () {
+              Navigator.of(context).popUntil((route) => route.isFirst);
+              music.signOut();
+            },
+          ),
+          const SizedBox(height: 24),
+          Center(
+            child: Text(
+              'nexMusic 0.2.0',
+              style: TextStyle(color: _muted(context), fontSize: 12),
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// NOW PLAYING SCREEN
-// Fixes: rotating artwork, aurora gradient play button, correct repeat icon,
-//        white text on all themes.
-// ─────────────────────────────────────────────────────────────────────────────
-
-class NowPlayingScreen extends StatefulWidget {
-  const NowPlayingScreen({super.key});
-  @override
-  State<NowPlayingScreen> createState() => _NowPlayingScreenState();
-}
-
-class _NowPlayingScreenState extends State<NowPlayingScreen>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _spin;
-  MusicController? _music;
+class SongListScreen extends StatelessWidget {
+  const SongListScreen({
+    super.key,
+    required this.title,
+    required this.emptyText,
+    required this.select,
+  });
+  final String title, emptyText;
+  final List<Song> Function(MusicController music) select;
 
   @override
-  void initState() {
-    super.initState();
-    _spin = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 20),
+  Widget build(BuildContext context) {
+    final songs = context.select<MusicController, List<Song>>(select);
+    return Scaffold(
+      appBar: AppBar(title: Text(title)),
+      body: songs.isEmpty
+          ? _EmptyState(
+              icon: Icons.music_note_outlined,
+              title: 'Nothing here yet',
+              subtitle: emptyText,
+            )
+          : ListView.builder(
+              padding: const EdgeInsets.only(bottom: 24),
+              itemCount: songs.length,
+              itemBuilder: (_, i) => SongTile(song: songs[i], queue: songs),
+            ),
+      bottomNavigationBar: const MiniPlayer(),
     );
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Private library
+// ─────────────────────────────────────────────────────────────────────────────
+
+class PrivateLibraryScreen extends StatefulWidget {
+  const PrivateLibraryScreen({super.key});
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (_music == null) {
-      _music = context.read<MusicController>();
-      _music!.addListener(_syncSpin);
-      _syncSpin();
-    }
-  }
+  State<PrivateLibraryScreen> createState() => _PrivateLibraryScreenState();
+}
 
-  void _syncSpin() {
-    if (!mounted) return;
-    final playing = _music?.playing ?? false;
-    if (playing && !_spin.isAnimating) {
-      _spin.repeat();
-    } else if (!playing && _spin.isAnimating) {
-      _spin.stop();
-    }
-  }
+class _PrivateLibraryScreenState extends State<PrivateLibraryScreen> {
+  String? _folderId;
 
-  @override
-  void dispose() {
-    _music?.removeListener(_syncSpin);
-    _spin.dispose();
-    super.dispose();
+  Future<void> _newFolder() async {
+    final folder = await _createFolder(context);
+    if (!mounted || folder == null) return;
+    setState(() => _folderId = folder.id);
   }
 
   @override
   Widget build(BuildContext context) {
     final music = context.watch<MusicController>();
-    final track = music.current;
-    if (track == null) {
-      return const Scaffold(body: Center(child: Text('Nothing playing')));
-    }
-    final max = math.max(1, music.duration.inMilliseconds).toDouble();
-    final dark = Theme.of(context).brightness == Brightness.dark;
-
+    final folders = music.mediaFolders;
+    final selected = folders.any((folder) => folder.id == _folderId)
+        ? _folderId
+        : null;
+    final items = selected == null
+        ? music.savedMedia
+        : music.savedMedia.where((item) => item.folderId == selected).toList();
     return Scaffold(
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              track.colors.first.withValues(alpha: dark ? 0.85 : 0.95),
-              dark ? Colors.black : const Color(0xFF0A0A14),
-            ],
-            stops: const [0, 0.70],
+      appBar: AppBar(
+        title: const Text('Private library'),
+        actions: [
+          IconButton(
+            tooltip: 'Add',
+            onPressed: () => _showImportMenu(context),
+            icon: const Icon(Icons.add_rounded),
           ),
-        ),
-        child: SafeArea(
-          child: LayoutBuilder(
-            builder: (context, viewport) {
-              final compact = viewport.maxHeight < 720;
-              final ultraCompact = viewport.maxHeight < 560;
-              final artworkSize = math.max(
-                ultraCompact ? 88.0 : 160.0,
-                math.min(
-                  viewport.maxWidth - 80,
-                  ultraCompact
-                      ? viewport.maxHeight * 0.23
-                      : compact
-                      ? viewport.maxHeight * 0.38
-                      : 290.0,
-                ),
-              );
-              return Column(
-                children: [
-                  // Top bar
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 4,
-                    ),
-                    child: Row(
-                      children: [
-                        IconButton(
-                          onPressed: Navigator.of(context).pop,
-                          icon: const Icon(
-                            Icons.keyboard_arrow_down_rounded,
-                            size: 32,
-                            color: Colors.white,
-                          ),
-                        ),
-                        const Expanded(
-                          child: Column(
-                            children: [
-                              Text(
-                                'NOW PLAYING',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: 2,
-                                  color: Colors.white60,
-                                ),
-                              ),
-                              Text(
-                                'nexMusic Mix',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
-                                  color: Colors.white,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        IconButton(
-                          onPressed: () => _simpleSheet(
-                            context,
-                            'Track options',
-                            'Add to playlist · View artist · Share',
-                          ),
-                          icon: const Icon(
-                            Icons.more_horiz_rounded,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  SizedBox(
-                    height: ultraCompact
-                        ? 2
-                        : compact
-                        ? 8
-                        : 20,
-                  ),
-                  // Rotating circular artwork (new feature)
-                  Center(
-                    child: RotationTransition(
-                      turns: _spin,
-                      child: Artwork(
-                        colors: track.colors,
-                        seed: track.id,
-                        size: artworkSize,
-                        radius: artworkSize / 2, // Full circle
-                        hero: 'art-${track.id}',
-                      ),
-                    ),
-                  ),
-                  SizedBox(
-                    height: ultraCompact
-                        ? 4
-                        : compact
-                        ? 18
-                        : 32,
-                  ),
-                  // Track info + like
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 28),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                track.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: ultraCompact ? 21 : 26,
-                                  fontWeight: FontWeight.w800,
-                                  color: Colors.white,
-                                  letterSpacing: -0.5,
-                                ),
-                              ),
-                              const SizedBox(height: 5),
-                              Text(
-                                track.artist,
-                                style: const TextStyle(
-                                  fontSize: 15,
-                                  color: Colors.white70,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        IconButton(
-                          onPressed: () => music.toggleLike(track),
-                          icon: Icon(
-                            music.isLiked(track)
-                                ? Icons.favorite_rounded
-                                : Icons.favorite_border_rounded,
-                            color: music.isLiked(track)
-                                ? const Color(0xFFFF4F9A)
-                                : Colors.white,
-                            size: 26,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  SizedBox(
-                    height: ultraCompact
-                        ? 4
-                        : compact
-                        ? 8
-                        : 16,
-                  ),
-                  // Seek bar — white slider on dark background
-                  RepaintBoundary(
-                    child: ValueListenableBuilder<Duration>(
-                      valueListenable: music.positionListenable,
-                      builder: (context, position, _) {
-                        final value = position.inMilliseconds
-                            .clamp(0, max.toInt())
-                            .toDouble();
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 24),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              SliderTheme(
-                                data: SliderThemeData(
-                                  trackHeight: 4,
-                                  thumbShape: const RoundSliderThumbShape(
-                                    enabledThumbRadius: 6,
-                                  ),
-                                  overlayShape: const RoundSliderOverlayShape(
-                                    overlayRadius: 14,
-                                  ),
-                                  activeTrackColor: Colors.white,
-                                  inactiveTrackColor: Colors.white24,
-                                  thumbColor: Colors.white,
-                                  overlayColor: Colors.white24,
-                                ),
-                                child: Slider(
-                                  value: value,
-                                  max: max,
-                                  onChanged: (v) => music.seek(
-                                    Duration(milliseconds: v.round()),
-                                  ),
-                                ),
-                              ),
-                              Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 4,
-                                ),
-                                child: Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    Text(
-                                      _time(position),
-                                      style: const TextStyle(
-                                        color: Colors.white60,
-                                        fontSize: 11,
-                                      ),
-                                    ),
-                                    Text(
-                                      _time(music.duration),
-                                      style: const TextStyle(
-                                        color: Colors.white60,
-                                        fontSize: 11,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                  SizedBox(
-                    height: ultraCompact
-                        ? 3
-                        : compact
-                        ? 10
-                        : 16,
-                  ),
-                  // Playback controls
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        IconButton(
-                          onPressed: music.toggleShuffle,
-                          icon: Icon(
-                            Icons.shuffle_rounded,
-                            // FIX: color driven by state
-                            color: music.shuffle
-                                ? const Color(0xFFEC4899)
-                                : Colors.white60,
-                            size: 26,
-                          ),
-                        ),
-                        IconButton(
-                          onPressed: music.previous,
-                          icon: const Icon(
-                            Icons.skip_previous_rounded,
-                            color: Colors.white,
-                            size: 42,
-                          ),
-                        ),
-                        // Play/pause — aurora gradient (FIX: was white-on-white)
-                        GestureDetector(
-                          onTap: music.loading ? null : music.togglePlay,
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 180),
-                            width: 72,
-                            height: 72,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              gradient: const LinearGradient(
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                                colors: [
-                                  NexMusicApp.violet,
-                                  NexMusicApp.flamingo,
-                                ],
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: NexMusicApp.violet.withValues(
-                                    alpha: 0.55,
-                                  ),
-                                  blurRadius: 30,
-                                  offset: const Offset(0, 8),
-                                ),
-                              ],
-                            ),
-                            child: music.loading
-                                ? const Center(
-                                    child: SizedBox.square(
-                                      dimension: 28,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2.5,
-                                        color: Colors.white,
-                                      ),
-                                    ),
-                                  )
-                                : Icon(
-                                    music.playing
-                                        ? Icons.pause_rounded
-                                        : Icons.play_arrow_rounded,
-                                    color: Colors.white,
-                                    size: 36,
-                                  ),
-                          ),
-                        ),
-                        IconButton(
-                          onPressed: music.next,
-                          icon: const Icon(
-                            Icons.skip_next_rounded,
-                            color: Colors.white,
-                            size: 42,
-                          ),
-                        ),
-                        IconButton(
-                          onPressed: music.toggleRepeat,
-                          icon: Icon(
-                            // FIX: correct icon — repeat vs repeat_one
-                            music.repeat
-                                ? Icons.repeat_one_rounded
-                                : Icons.repeat_rounded,
-                            color: music.repeat
-                                ? const Color(0xFFEC4899)
-                                : Colors.white60,
-                            size: 26,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const Spacer(),
-                  // Bottom: lyrics + queue
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        TextButton.icon(
-                          onPressed: () => _lyricsSheet(context, track),
-                          icon: const Icon(
-                            Icons.lyrics_outlined,
-                            size: 19,
-                            color: Colors.white60,
-                          ),
-                          label: const Text(
-                            'Lyrics',
-                            style: TextStyle(color: Colors.white60),
-                          ),
-                        ),
-                        TextButton.icon(
-                          onPressed: () => _queueSheet(context),
-                          icon: const Icon(
-                            Icons.queue_music_rounded,
-                            size: 19,
-                            color: Colors.white60,
-                          ),
-                          label: const Text(
-                            'Queue',
-                            style: TextStyle(color: Colors.white60),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              );
-            },
-          ),
-        ),
+          const SizedBox(width: 4),
+        ],
       ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SONG TILE  (FIX: trailing shows heart not hamburger menu)
-// ─────────────────────────────────────────────────────────────────────────────
-
-class SongTile extends StatelessWidget {
-  const SongTile({
-    super.key,
-    required this.track,
-    required this.queue,
-    this.number,
-  });
-  final Track track;
-  final List<Track> queue;
-  final int? number;
-
-  @override
-  Widget build(BuildContext context) {
-    final tileState = context
-        .select<MusicController, ({String? currentId, bool liked})>(
-          (music) =>
-              (currentId: music.current?.id, liked: music.isLiked(track)),
-        );
-    final music = context.read<MusicController>();
-    final active = tileState.currentId == track.id;
-
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-      leading: Row(
-        mainAxisSize: MainAxisSize.min,
+      body: Column(
         children: [
-          if (number != null)
-            SizedBox(
-              width: 28,
-              child: active
-                  ? const Icon(
-                      Icons.graphic_eq_rounded,
-                      color: NexMusicApp.violet,
-                      size: 18,
-                    )
-                  : Text(
-                      '$number',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: active ? NexMusicApp.violet : Colors.grey,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-            ),
-          Artwork(colors: track.colors, seed: track.id, size: 54, radius: 14),
-        ],
-      ),
-      title: Text(
-        track.title,
-        maxLines: 1,
-        style: TextStyle(
-          fontWeight: FontWeight.w600,
-          color: active ? NexMusicApp.violet : null,
-        ),
-      ),
-      subtitle: Row(
-        children: [
-          if (track.explicit)
-            Container(
-              margin: const EdgeInsets.only(right: 5),
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-              decoration: BoxDecoration(
-                color: Colors.grey.withValues(alpha: 0.25),
-                borderRadius: BorderRadius.circular(3),
-              ),
-              child: const Text(
-                'E',
-                style: TextStyle(fontSize: 8, fontWeight: FontWeight.w700),
-              ),
-            ),
-          Flexible(
-            child: Text(
-              '${track.artist} · ${track.album}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      ),
-      trailing: IconButton(
-        onPressed: () => music.toggleLike(track),
-        icon: Icon(
-          // FIX: always show heart icon — filled when liked, outline when not
-          tileState.liked
-              ? Icons.favorite_rounded
-              : Icons.favorite_border_rounded,
-          size: 21,
-          color: tileState.liked ? const Color(0xFFFF4F9A) : null,
-        ),
-      ),
-      onTap: () => music.play(track, from: queue),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ARTWORK WIDGET
-// ─────────────────────────────────────────────────────────────────────────────
-
-class Artwork extends StatelessWidget {
-  const Artwork({
-    super.key,
-    required this.colors,
-    required this.seed,
-    this.size,
-    this.radius = 20,
-    this.hero,
-  });
-  final List<Color> colors;
-  final String seed;
-  final double? size, radius;
-  final Object? hero;
-
-  @override
-  Widget build(BuildContext context) {
-    final art = Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(radius!),
-        gradient: LinearGradient(
-          colors: colors,
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: colors.last.withValues(alpha: 0.22),
-            blurRadius: 24,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: CustomPaint(painter: _ArtworkPainter(seed.hashCode)),
-    );
-    return hero == null ? art : Hero(tag: hero!, child: art);
-  }
-}
-
-class _ArtworkPainter extends CustomPainter {
-  const _ArtworkPainter(this.seed);
-  final int seed;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final random = math.Random(seed);
-    final paint = Paint()..color = Colors.white.withValues(alpha: 0.14);
-    for (var i = 0; i < 7; i++) {
-      canvas.drawCircle(
-        Offset(
-          random.nextDouble() * size.width,
-          random.nextDouble() * size.height,
-        ),
-        size.shortestSide * (0.08 + random.nextDouble() * 0.2),
-        paint,
-      );
-    }
-    final text = TextPainter(
-      text: TextSpan(
-        text: String.fromCharCode(Icons.graphic_eq_rounded.codePoint),
-        style: TextStyle(
-          fontFamily: Icons.graphic_eq_rounded.fontFamily,
-          package: Icons.graphic_eq_rounded.fontPackage,
-          fontSize: size.shortestSide * 0.42,
-          color: Colors.white.withValues(alpha: 0.88),
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    text.paint(
-      canvas,
-      Offset((size.width - text.width) / 2, (size.height - text.height) / 2),
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _ArtworkPainter oldDelegate) =>
-      seed != oldDelegate.seed;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// COLLECTION SCREEN
-// ─────────────────────────────────────────────────────────────────────────────
-
-class CollectionScreen extends StatelessWidget {
-  const CollectionScreen({super.key, required this.collection});
-  final MusicCollection collection;
-
-  @override
-  Widget build(BuildContext context) {
-    final songs = tracksFor(collection);
-    return Scaffold(
-      body: CustomScrollView(
-        slivers: [
-          SliverAppBar(
-            expandedHeight: 350,
-            pinned: true,
-            stretch: true,
-            flexibleSpace: FlexibleSpaceBar(
-              background: Container(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      ...collection.colors,
-                      Theme.of(context).scaffoldBackgroundColor,
-                    ],
-                  ),
+          SizedBox(
+            height: 52,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.fromLTRB(20, 8, 12, 8),
+              children: [
+                _Pill(
+                  label: 'All',
+                  selected: selected == null,
+                  onTap: () => setState(() => _folderId = null),
                 ),
-                child: SafeArea(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const SizedBox(height: 24),
-                      Artwork(
-                        colors: collection.colors.reversed.toList(),
-                        seed: collection.id,
-                        size: 205,
-                        radius: 28,
-                      ),
-                    ],
+                for (final folder in folders)
+                  _Pill(
+                    label: folder.name,
+                    selected: selected == folder.id,
+                    onTap: () => setState(() => _folderId = folder.id),
+                    onLongPress: () => _folderActions(context, folder),
                   ),
+                _Pill(
+                  icon: Icons.add_rounded,
+                  label: 'Folder',
+                  onTap: _newFolder,
                 ),
-              ),
+              ],
             ),
           ),
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
-            sliver: SliverToBoxAdapter(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    collection.title,
-                    style: const TextStyle(
-                      fontSize: 30,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -0.5,
-                    ),
+          Expanded(
+            child: items.isEmpty
+                ? const _EmptyState(
+                    icon: Icons.lock_outline_rounded,
+                    title: 'Nothing saved yet',
+                    subtitle:
+                        'Save links or keep your own files here. Only you can see them.',
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.only(bottom: 24),
+                    itemCount: items.length,
+                    itemBuilder: (context, i) => _PrivateTile(item: items[i]),
                   ),
-                  const SizedBox(height: 7),
-                  Text(
-                    collection.subtitle,
-                    style: const TextStyle(color: Colors.grey),
-                  ),
-                  const SizedBox(height: 15),
-                  Row(
-                    children: [
-                      IconButton(
-                        onPressed: () {},
-                        icon: const Icon(Icons.favorite_border_rounded),
-                      ),
-                      IconButton(
-                        onPressed: () => _simpleSheet(
-                          context,
-                          'Playlist options',
-                          'Share, download and collaborative controls.',
-                        ),
-                        icon: const Icon(Icons.more_horiz_rounded),
-                      ),
-                      const Spacer(),
-                      IconButton(
-                        onPressed: context
-                            .read<MusicController>()
-                            .toggleShuffle,
-                        icon: const Icon(Icons.shuffle_rounded),
-                      ),
-                      const SizedBox(width: 8),
-                      if (songs.isNotEmpty)
-                        GestureDetector(
-                          onTap: () => context.read<MusicController>().play(
-                            songs.first,
-                            from: songs,
-                          ),
-                          child: Container(
-                            width: 58,
-                            height: 58,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              gradient: const LinearGradient(
-                                colors: [
-                                  NexMusicApp.violet,
-                                  NexMusicApp.flamingo,
-                                ],
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: NexMusicApp.violet.withValues(
-                                    alpha: 0.45,
-                                  ),
-                                  blurRadius: 20,
-                                  offset: const Offset(0, 6),
-                                ),
-                              ],
-                            ),
-                            child: const Icon(
-                              Icons.play_arrow_rounded,
-                              color: Colors.white,
-                              size: 30,
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
           ),
-          SliverList.builder(
-            itemCount: songs.length,
-            itemBuilder: (context, i) => Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              child: SongTile(track: songs[i], number: i + 1, queue: songs),
-            ),
-          ),
-          const SliverToBoxAdapter(child: SizedBox(height: 45)),
         ],
       ),
+      bottomNavigationBar: const MiniPlayer(),
     );
   }
 }
 
-class LikedSongsScreen extends StatelessWidget {
-  const LikedSongsScreen({super.key, required this.songs});
-  final List<Track> songs;
-
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Liked Songs')),
-    body: songs.isEmpty
-        ? const _EmptyState(
-            icon: Icons.favorite_border_rounded,
-            title: 'Your favorites live here',
-            subtitle: 'Tap the heart on any track to save it.',
-          )
-        : ListView.builder(
-            padding: const EdgeInsets.only(top: 10),
-            itemCount: songs.length,
-            itemBuilder: (context, i) => Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              child: SongTile(track: songs[i], number: i + 1, queue: songs),
-            ),
-          ),
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SAVED MEDIA EDITOR
-// ─────────────────────────────────────────────────────────────────────────────
-
-class SavedMediaEditorScreen extends StatefulWidget {
-  const SavedMediaEditorScreen({super.key, required this.item});
+class _PrivateTile extends StatelessWidget {
+  const _PrivateTile({required this.item});
   final SavedMedia item;
 
   @override
-  State<SavedMediaEditorScreen> createState() => _SavedMediaEditorScreenState();
-}
-
-class _SavedMediaEditorScreenState extends State<SavedMediaEditorScreen> {
-  late final TextEditingController _titleController;
-  late final TextEditingController _urlController;
-  late String? _folderId;
-  bool _saving = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _titleController = TextEditingController(text: widget.item.title);
-    _urlController = TextEditingController(text: widget.item.sourceUrl ?? '');
-    _folderId = widget.item.folderId;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final folders = context.read<MusicController>().mediaFolders;
-      if (!mounted || folders.any((f) => f.id == _folderId)) return;
-      if (folders.isNotEmpty) setState(() => _folderId = folders.first.id);
-    });
-  }
-
-  @override
-  void dispose() {
-    _titleController.dispose();
-    _urlController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save() async {
-    if (_folderId == null) return;
-    setState(() => _saving = true);
-    final success = await context.read<MusicController>().updateMedia(
-      widget.item,
-      title: _titleController.text,
-      folderId: _folderId!,
-      sourceUrl: widget.item.kind == 'link' ? _urlController.text : null,
-    );
-    if (!mounted) return;
-    setState(() => _saving = false);
-    if (success) Navigator.pop(context);
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final folders = context.select<MusicController, List<MediaFolder>>(
-      (music) => music.mediaFolders,
-    );
-    final isLink = widget.item.kind == 'link';
-    return Scaffold(
-      appBar: AppBar(title: const Text('Edit saved item')),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
-        children: [
-          TextField(
-            controller: _titleController,
-            textInputAction: isLink
-                ? TextInputAction.next
-                : TextInputAction.done,
-            decoration: const InputDecoration(
-              labelText: 'Title',
-              prefixIcon: Icon(Icons.title_rounded),
-            ),
-          ),
-          if (isLink) ...[
-            const SizedBox(height: 12),
-            TextField(
-              controller: _urlController,
-              keyboardType: TextInputType.url,
-              decoration: const InputDecoration(
-                labelText: 'Video link',
-                prefixIcon: Icon(Icons.link_rounded),
-              ),
-            ),
-          ],
-          const SizedBox(height: 12),
-          _FolderSelector(
-            folders: folders,
-            value: _folderId,
-            onChanged: (value) => setState(() => _folderId = value),
-          ),
-          const SizedBox(height: 18),
-          FilledButton.icon(
-            onPressed: _saving || _folderId == null ? null : _save,
-            icon: _saving
-                ? const SizedBox.square(
-                    dimension: 19,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.save_outlined),
-            label: Text(_saving ? 'Saving…' : 'Save changes'),
-          ),
-        ],
+    final music = context.read<MusicController>();
+    return ListTile(
+      contentPadding: const EdgeInsets.only(left: 20, right: 8),
+      leading: _Thumb(icon: _mediaIcon(item)),
+      title: Text(
+        item.title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontWeight: FontWeight.w500),
       ),
+      subtitle: Text(
+        _mediaSubtitle(music, item),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(color: _muted(context), fontSize: 12),
+      ),
+      trailing: IconButton(
+        tooltip: 'More',
+        onPressed: () => _privateActions(context, item),
+        icon: Icon(Icons.more_vert_rounded, color: _muted(context)),
+      ),
+      onTap: () => _openPrivate(context, item),
     );
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SHARED IMPORT SCREEN
-// ─────────────────────────────────────────────────────────────────────────────
+Future<void> _openPrivate(BuildContext context, SavedMedia item) async {
+  if (item.kind == 'link') {
+    final url = item.sourceUrl;
+    if (url == null) return;
+    if (_webViewSupported) {
+      _push(context, NexBrowserScreen(sharedLink: url));
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: url));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Link copied.')));
+    return;
+  }
+  final song = await context.read<MusicController>().privateSong(item);
+  if (song == null || !context.mounted) return;
+  _openSong(context, song, queue: [song]);
+}
+
+Future<void> _privateActions(BuildContext context, SavedMedia item) {
+  final music = context.read<MusicController>();
+  final downloaded = music.isDownloaded(item);
+  return _sheet(
+    context,
+    title: item.title,
+    (sheetContext) => [
+      ListTile(
+        leading: const Icon(Icons.edit_outlined),
+        title: const Text('Edit or move'),
+        onTap: () {
+          Navigator.pop(sheetContext);
+          _push(context, SavedMediaEditorScreen(item: item));
+        },
+      ),
+      if (item.storagePath != null && !downloaded && !kIsWeb)
+        ListTile(
+          leading: const Icon(Icons.download_rounded),
+          title: const Text('Download offline'),
+          onTap: () {
+            Navigator.pop(sheetContext);
+            music.downloadMedia(item);
+          },
+        ),
+      if (downloaded)
+        ListTile(
+          leading: const Icon(Icons.offline_pin_outlined),
+          title: const Text('Remove offline copy'),
+          onTap: () {
+            Navigator.pop(sheetContext);
+            music.removeDownload(item);
+          },
+        ),
+      ListTile(
+        leading: const Icon(Icons.delete_outline_rounded),
+        title: const Text('Delete'),
+        onTap: () async {
+          Navigator.pop(sheetContext);
+          final confirmed = await _confirm(
+            context,
+            title: 'Delete "${item.title}"?',
+            body: item.storagePath == null
+                ? 'This saved link will be removed.'
+                : 'The cloud file and any offline copy will be removed.',
+            action: 'Delete',
+          );
+          if (confirmed) await music.deleteMedia(item);
+        },
+      ),
+    ],
+  );
+}
+
+Future<void> _folderActions(BuildContext context, MediaFolder folder) {
+  final music = context.read<MusicController>();
+  final count = music.savedMedia
+      .where((item) => item.folderId == folder.id)
+      .length;
+  final lastFolder = music.mediaFolders.length <= 1;
+  return _sheet(
+    context,
+    title: folder.name,
+    (sheetContext) => [
+      ListTile(
+        leading: const Icon(Icons.drive_file_rename_outline_rounded),
+        title: const Text('Rename'),
+        onTap: () async {
+          Navigator.pop(sheetContext);
+          final name = await _nameDialog(
+            context,
+            title: 'Rename folder',
+            action: 'Save',
+            initialValue: folder.name,
+          );
+          if (name != null) await music.updateMediaFolder(folder, name);
+        },
+      ),
+      ListTile(
+        enabled: count == 0 && !lastFolder,
+        leading: const Icon(Icons.delete_outline_rounded),
+        title: const Text('Delete'),
+        subtitle: Text(
+          count > 0
+              ? 'Move its $count item(s) first'
+              : lastFolder
+              ? 'Keep at least one folder'
+              : 'Folder is empty',
+        ),
+        onTap: () async {
+          Navigator.pop(sheetContext);
+          final confirmed = await _confirm(
+            context,
+            title: 'Delete "${folder.name}"?',
+            body: 'This folder will be removed.',
+            action: 'Delete',
+          );
+          if (confirmed) await music.deleteMediaFolder(folder);
+        },
+      ),
+    ],
+  );
+}
+
+void _showImportMenu(BuildContext context) {
+  _sheet(
+    context,
+    title: 'Add to private library',
+    (sheetContext) => [
+      ListTile(
+        leading: const Icon(Icons.link_rounded),
+        title: const Text('Save a link'),
+        subtitle: const Text('YouTube or any web page'),
+        onTap: () {
+          Navigator.pop(sheetContext);
+          _push(context, const SharedImportScreen(source: ''));
+        },
+      ),
+      ListTile(
+        leading: const Icon(Icons.content_cut_rounded),
+        title: const Text('Keep my own file'),
+        subtitle: const Text('Trim audio or save the original privately'),
+        onTap: () async {
+          Navigator.pop(sheetContext);
+          // Media types instead of extensions, as in UploadScreen._pickFiles.
+          final file = await FilePicker.pickFile(type: FileType.media);
+          final source = file?.path;
+          if (!context.mounted || file == null || source == null) return;
+          if (uploadKindFor(file.name) == null) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Choose an audio or video file.')),
+            );
+            return;
+          }
+          _push(
+            context,
+            OwnedMediaEditorScreen(source: source, suggestedName: file.name),
+          );
+        },
+      ),
+    ],
+  );
+}
 
 class SharedImportScreen extends StatefulWidget {
-  const SharedImportScreen({
-    super.key,
-    required this.source,
-    required this.isLocalMedia,
-  });
+  const SharedImportScreen({super.key, required this.source});
   final String source;
-  final bool isLocalMedia;
 
   @override
   State<SharedImportScreen> createState() => _SharedImportScreenState();
@@ -3277,26 +3305,23 @@ class _SharedImportScreenState extends State<SharedImportScreen> {
   @override
   void initState() {
     super.initState();
+    final incoming = widget.source.trim();
     final url =
         RegExp(r'https?://\S+')
-            .firstMatch(widget.source)
+            .firstMatch(incoming)
             ?.group(0)
             ?.replaceAll(RegExp(r'[),.]+$'), '') ??
-        widget.source;
+        incoming;
     _urlController = TextEditingController(text: url);
-    _titleController = TextEditingController(text: 'Shared video');
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final folders = context.read<MusicController>().mediaFolders;
-      if (mounted && folders.isNotEmpty) {
-        setState(() => _folderId = folders.first.id);
-      }
-      if (!widget.isLocalMedia && widget.source.trim().isNotEmpty) {
-        _copyLinkAndOpenBrowser();
-      }
-    });
+    _titleController = TextEditingController(
+      text: incoming.isEmpty ? '' : 'Shared video',
+    );
+    if (incoming.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _openInBrowser());
+    }
   }
 
-  Future<void> _copyLinkAndOpenBrowser() async {
+  Future<void> _openInBrowser() async {
     final value = _urlController.text.trim();
     final uri = Uri.tryParse(value);
     if (uri == null || (uri.scheme != 'https' && uri.scheme != 'http')) {
@@ -3307,20 +3332,14 @@ class _SharedImportScreenState extends State<SharedImportScreen> {
       return;
     }
     await Clipboard.setData(ClipboardData(text: value));
-    final supported =
-        !kIsWeb &&
-        (defaultTargetPlatform == TargetPlatform.android ||
-            defaultTargetPlatform == TargetPlatform.iOS);
     if (!mounted) return;
-    if (supported) {
-      await Navigator.of(context).push<void>(
-        MaterialPageRoute(builder: (_) => NexBrowserScreen(sharedLink: value)),
-      );
+    if (_webViewSupported) {
+      _push(context, NexBrowserScreen(sharedLink: value));
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Link copied. In-app browser is available on mobile.'),
+        content: Text('Link copied. The browser is available on mobile.'),
       ),
     );
   }
@@ -3333,167 +3352,390 @@ class _SharedImportScreenState extends State<SharedImportScreen> {
   }
 
   Future<void> _saveLink() async {
-    if (_urlController.text.trim().isEmpty || _folderId == null) return;
+    final folderId = _folderId;
+    if (_urlController.text.trim().isEmpty || folderId == null) return;
     setState(() => _saving = true);
-    final success = await context.read<MusicController>().saveSharedLink(
+    final saved = await context.read<MusicController>().saveSharedLink(
       url: _urlController.text.trim(),
-      title: _titleController.text.trim().isEmpty
-          ? 'Shared video'
-          : _titleController.text.trim(),
-      folderId: _folderId!,
+      title: _titleController.text.trim(),
+      folderId: folderId,
     );
     if (!mounted) return;
     setState(() => _saving = false);
-    if (success) Navigator.pop(context);
+    if (saved) Navigator.pop(context);
   }
 
   @override
   Widget build(BuildContext context) {
-    if (widget.isLocalMedia) {
-      return OwnedMediaEditorScreen(
-        source: widget.source,
-        suggestedName: 'Shared media',
-      );
-    }
     final folders = context.select<MusicController, List<MediaFolder>>(
       (music) => music.mediaFolders,
     );
+    final folderValid = folders.any((folder) => folder.id == _folderId);
     return Scaffold(
-      appBar: AppBar(title: const Text('Save video link')),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
-        children: [
-          Container(
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [Color(0xFF332361), Color(0xFF7D315E)],
-              ),
-              borderRadius: BorderRadius.circular(24),
-            ),
-            child: const Row(
-              children: [
-                Icon(
-                  Icons.smart_display_rounded,
-                  color: Colors.white,
-                  size: 38,
-                ),
-                SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Link inbox',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 17,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      SizedBox(height: 4),
-                      Text(
-                        'Save the link first, or open it directly to inspect.',
-                        style: TextStyle(color: Colors.white70),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
+      appBar: AppBar(
+        title: const Text('Save link'),
+        actions: [
+          IconButton(
+            tooltip: 'Open in browser',
+            onPressed: _openInBrowser,
+            icon: const Icon(Icons.open_in_new_rounded),
           ),
-          const SizedBox(height: 22),
+          const SizedBox(width: 4),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
+        children: [
           TextField(
             controller: _urlController,
             keyboardType: TextInputType.url,
-            decoration: const InputDecoration(
-              labelText: 'Video link',
-              prefixIcon: Icon(Icons.link_rounded),
-            ),
+            decoration: const InputDecoration(labelText: 'Link'),
           ),
           const SizedBox(height: 12),
           TextField(
             controller: _titleController,
-            decoration: const InputDecoration(
-              labelText: 'Save as',
-              prefixIcon: Icon(Icons.title_rounded),
+            decoration: const InputDecoration(labelText: 'Title'),
+          ),
+          const SizedBox(height: 20),
+          _ChoicePicker(
+            label: 'Folder',
+            options: [
+              for (final folder in folders) (id: folder.id, name: folder.name),
+            ],
+            selectedId: _folderId,
+            onChanged: (id) => setState(() => _folderId = id),
+            onCreate: () async => (await _createFolder(context))?.id,
+            createLabel: 'New folder',
+          ),
+          const SizedBox(height: 24),
+          FilledButton(
+            onPressed: _saving || !folderValid ? null : _saveLink,
+            child: Text(_saving ? 'Saving…' : 'Save link'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class SavedMediaEditorScreen extends StatefulWidget {
+  const SavedMediaEditorScreen({super.key, required this.item});
+  final SavedMedia item;
+
+  @override
+  State<SavedMediaEditorScreen> createState() => _SavedMediaEditorScreenState();
+}
+
+class _SavedMediaEditorScreenState extends State<SavedMediaEditorScreen> {
+  late final _titleController = TextEditingController(text: widget.item.title);
+  late final _urlController = TextEditingController(
+    text: widget.item.sourceUrl ?? '',
+  );
+  late String _folderId = widget.item.folderId;
+  bool _saving = false;
+
+  @override
+  void dispose() {
+    _titleController.dispose();
+    _urlController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final music = context.read<MusicController>();
+    setState(() => _saving = true);
+    final saved = await music.updateMedia(
+      widget.item,
+      title: _titleController.text,
+      folderId: _folderId,
+      sourceUrl: widget.item.kind == 'link' ? _urlController.text : null,
+    );
+    if (!mounted) return;
+    setState(() => _saving = false);
+    if (saved) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final folders = context.select<MusicController, List<MediaFolder>>(
+      (music) => music.mediaFolders,
+    );
+    final isLink = widget.item.kind == 'link';
+    final folderValid = folders.any((folder) => folder.id == _folderId);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Edit')),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
+        children: [
+          TextField(
+            controller: _titleController,
+            decoration: const InputDecoration(labelText: 'Title'),
+          ),
+          if (isLink) ...[
+            const SizedBox(height: 12),
+            TextField(
+              controller: _urlController,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(labelText: 'Link'),
             ),
+          ],
+          const SizedBox(height: 20),
+          _ChoicePicker(
+            label: 'Folder',
+            options: [
+              for (final folder in folders) (id: folder.id, name: folder.name),
+            ],
+            selectedId: _folderId,
+            onChanged: (id) => setState(() => _folderId = id),
+            onCreate: () async => (await _createFolder(context))?.id,
+            createLabel: 'New folder',
+          ),
+          const SizedBox(height: 24),
+          FilledButton(
+            onPressed: _saving || !folderValid ? null : _save,
+            child: Text(_saving ? 'Saving…' : 'Save'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class OwnedMediaEditorScreen extends StatefulWidget {
+  const OwnedMediaEditorScreen({
+    super.key,
+    required this.source,
+    required this.suggestedName,
+  });
+  final String source, suggestedName;
+
+  @override
+  State<OwnedMediaEditorScreen> createState() => _OwnedMediaEditorScreenState();
+}
+
+class _OwnedMediaEditorScreenState extends State<OwnedMediaEditorScreen> {
+  static const _mediaChannel = _mediaTools;
+  final _preview = AudioPlayer();
+  late final TextEditingController _titleController;
+  StreamSubscription<Duration>? _positionSub;
+  double _durationSeconds = 180, _startSeconds = 0, _endSeconds = 30;
+  String? _folderId, _error;
+  bool _permitted = false, _processing = false, _previewing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final baseName = widget.suggestedName.replaceAll(RegExp(r'\.[^.]+$'), '');
+    _titleController = TextEditingController(text: baseName);
+    _positionSub = _preview.positionStream.listen((position) {
+      if (position.inMilliseconds >= _endSeconds * 1000 && _preview.playing) {
+        _preview.pause();
+        if (mounted) setState(() => _previewing = false);
+      }
+    });
+    _loadPreview();
+  }
+
+  Future<void> _loadPreview() async {
+    try {
+      final foundDuration = await _preview.setUrl(widget.source);
+      if (!mounted || foundDuration == null) return;
+      setState(() {
+        _durationSeconds = math.max(1, foundDuration.inMilliseconds / 1000);
+        _endSeconds = math.min(_durationSeconds, 30);
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _error =
+              'Preview unavailable; extraction may still work on Android.',
+        );
+      }
+    }
+  }
+
+  Future<void> _togglePreview() async {
+    if (_preview.playing) {
+      await _preview.pause();
+      if (!mounted) return;
+      setState(() => _previewing = false);
+      return;
+    }
+    await _preview.seek(Duration(milliseconds: (_startSeconds * 1000).round()));
+    if (!mounted) return;
+    _preview.play();
+    setState(() => _previewing = true);
+  }
+
+  Future<void> _processAndSave() async {
+    final folderId = _folderId;
+    if (!_permitted || folderId == null) return;
+    setState(() {
+      _processing = true;
+      _error = null;
+    });
+    try {
+      await _preview.pause();
+      final exportPath = await _mediaChannel
+          .invokeMethod<String>('extractAndTrimAudio', {
+            'source': widget.source,
+            'startMs': (_startSeconds * 1000).round(),
+            'endMs': (_endSeconds * 1000).round(),
+          });
+      if (exportPath == null) throw StateError('No export was created.');
+      if (!mounted) return;
+      final uploaded = await context.read<MusicController>().uploadOwnedAudio(
+        filePath: exportPath,
+        title: _titleController.text.trim().isEmpty
+            ? 'Imported audio'
+            : _titleController.text.trim(),
+        folderId: folderId,
+      );
+      if (mounted && uploaded) Navigator.pop(context);
+    } on PlatformException catch (e) {
+      if (mounted) setState(() => _error = e.message ?? e.code);
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _processing = false);
+    }
+  }
+
+  Future<void> _uploadOriginal() async {
+    final folderId = _folderId;
+    if (!_permitted || folderId == null) return;
+    final ext = widget.suggestedName.split('.').last.toLowerCase();
+    final isVideo = const {'mp4', 'mov'}.contains(ext);
+    final contentType = switch (ext) {
+      'mov' => 'video/quicktime',
+      'mp4' => 'video/mp4',
+      'mp3' => 'audio/mpeg',
+      'aac' => 'audio/aac',
+      _ => 'audio/mp4',
+    };
+    setState(() {
+      _processing = true;
+      _error = null;
+    });
+    try {
+      await _preview.pause();
+      if (!mounted) return;
+      final uploaded = await context.read<MusicController>().uploadOwnedMedia(
+        filePath: widget.source,
+        title: _titleController.text.trim().isEmpty
+            ? 'Imported media'
+            : _titleController.text.trim(),
+        folderId: folderId,
+        kind: isVideo ? 'video' : 'audio',
+        contentType: contentType,
+      );
+      if (mounted && uploaded) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _processing = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _positionSub?.cancel();
+    _preview.dispose();
+    _titleController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final folders = context.select<MusicController, List<MediaFolder>>(
+      (music) => music.mediaFolders,
+    );
+    final canSave =
+        _permitted &&
+        !_processing &&
+        folders.any((folder) => folder.id == _folderId);
+    String at(double seconds) =>
+        _time(Duration(milliseconds: (seconds * 1000).round()));
+    return Scaffold(
+      appBar: AppBar(title: const Text('Keep privately')),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
+        children: [
+          TextField(
+            controller: _titleController,
+            decoration: const InputDecoration(labelText: 'Title'),
+          ),
+          const SizedBox(height: 24),
+          Row(
+            children: [
+              const Text('Trim', style: TextStyle(fontWeight: FontWeight.w600)),
+              const Spacer(),
+              Text(
+                '${at(_startSeconds)} – ${at(_endSeconds)}',
+                style: TextStyle(color: _muted(context), fontSize: 13),
+              ),
+            ],
+          ),
+          RangeSlider(
+            values: RangeValues(_startSeconds, _endSeconds),
+            min: 0,
+            max: _durationSeconds,
+            divisions: math.max(1, _durationSeconds.round()),
+            labels: RangeLabels(at(_startSeconds), at(_endSeconds)),
+            onChanged: (values) => setState(() {
+              _startSeconds = values.start;
+              _endSeconds = values.end;
+            }),
+          ),
+          OutlinedButton.icon(
+            onPressed: _togglePreview,
+            icon: Icon(
+              _previewing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+            ),
+            label: Text(_previewing ? 'Pause' : 'Preview selection'),
+          ),
+          const SizedBox(height: 24),
+          _ChoicePicker(
+            label: 'Folder',
+            options: [
+              for (final folder in folders) (id: folder.id, name: folder.name),
+            ],
+            selectedId: _folderId,
+            onChanged: (id) => setState(() => _folderId = id),
+            onCreate: () async => (await _createFolder(context))?.id,
+            createLabel: 'New folder',
           ),
           const SizedBox(height: 12),
-          _FolderSelector(
-            folders: folders,
-            value: _folderId,
-            onChanged: (value) => setState(() => _folderId = value),
-          ),
-          const SizedBox(height: 18),
-          Card(
-            child: Column(
-              children: [
-                ListTile(
-                  leading: const CircleAvatar(
-                    child: Icon(Icons.bookmark_add_rounded),
-                  ),
-                  title: const Text(
-                    'Save to library',
-                    style: TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  subtitle: const Text(
-                    'Adds this YouTube/video link inside selected folder',
-                  ),
-                  trailing: const Icon(
-                    Icons.check_circle_rounded,
-                    color: NexMusicApp.violet,
-                  ),
-                  onTap: _saveLink,
-                ),
-                const Divider(height: 1, indent: 72),
-                ListTile(
-                  leading: const CircleAvatar(
-                    child: Icon(Icons.language_rounded),
-                  ),
-                  title: const Text(
-                    'Open this link',
-                    style: TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  subtitle: const Text('Copies and loads the link in browser'),
-                  trailing: const Icon(Icons.open_in_new_rounded),
-                  onTap: _copyLinkAndOpenBrowser,
-                ),
-              ],
+          CheckboxListTile(
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            value: _permitted,
+            onChanged: (value) => setState(() => _permitted = value ?? false),
+            title: const Text(
+              'I own this media or have permission to process it',
+              style: TextStyle(fontSize: 14),
             ),
           ),
-          const SizedBox(height: 14),
-          OutlinedButton.icon(
-            onPressed: () async {
-              final file = await FilePicker.pickFile(
-                type: FileType.custom,
-                allowedExtensions: const ['mp4', 'mov', 'm4a', 'aac', 'mp3'],
-              );
-              final source = file?.path;
-              if (!context.mounted || file == null || source == null) return;
-              Navigator.pushReplacement<void, void>(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => OwnedMediaEditorScreen(
-                    source: source,
-                    suggestedName: file.name,
-                  ),
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(
+                _error!,
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.error,
+                  fontSize: 13,
                 ),
-              );
-            },
-            icon: const Icon(Icons.video_file_outlined),
-            label: const Text('Choose my own media instead'),
+              ),
+            ),
+          const SizedBox(height: 8),
+          FilledButton(
+            onPressed: canSave ? _processAndSave : null,
+            child: Text(_processing ? 'Processing…' : 'Trim & save audio'),
           ),
-          const SizedBox(height: 10),
-          FilledButton.icon(
-            onPressed: _saving ? null : _saveLink,
-            icon: _saving
-                ? const SizedBox.square(
-                    dimension: 19,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.cloud_done_outlined),
-            label: const Text('Save link'),
+          const SizedBox(height: 12),
+          OutlinedButton(
+            onPressed: canSave ? _uploadOriginal : null,
+            child: const Text('Save original file'),
           ),
         ],
       ),
@@ -3502,7 +3744,7 @@ class _SharedImportScreenState extends State<SharedImportScreen> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NEX BROWSER SCREEN
+// Browser
 // ─────────────────────────────────────────────────────────────────────────────
 
 class NexBrowserScreen extends StatefulWidget {
@@ -3520,6 +3762,12 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
   late final TextEditingController _firstPillController;
   late final TextEditingController _secondPillController;
   var _progress = 0;
+  bool _downloading = false;
+  String? _currentPage, _userAgent;
+
+  /// Main-frame URLs requested without a page starting. The Android WebView
+  /// hands a file download back as a repeat request for the same URL.
+  final Map<String, int> _unstarted = {};
 
   @override
   void initState() {
@@ -3535,11 +3783,15 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     _secondPillController.addListener(_saveSecondPill);
     _browser = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(const Color(0xFFF7F6FA))
+      ..setBackgroundColor(Colors.white)
       ..setNavigationDelegate(
         NavigationDelegate(
           onProgress: (value) {
-            if (mounted) setState(() => _progress = value);
+            if (mounted && !_downloading) setState(() => _progress = value);
+          },
+          onPageStarted: (url) {
+            _currentPage = url;
+            _unstarted.remove(url);
           },
           onUrlChange: (change) {
             final url = change.url;
@@ -3551,6 +3803,24 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
             final uri = Uri.tryParse(request.url);
             if (uri == null ||
                 (uri.scheme != 'https' && uri.scheme != 'http')) {
+              if (request.isMainFrame &&
+                  (uri?.scheme == 'blob' || uri?.scheme == 'data')) {
+                _snack(
+                  'This site builds its download inside the page, which nexMusic cannot capture. Try another site.',
+                );
+              }
+              return NavigationDecision.prevent;
+            }
+            if (!request.isMainFrame) return NavigationDecision.navigate;
+            final attempts = _unstarted[request.url] =
+                (_unstarted[request.url] ?? 0) + 1;
+            if (attempts > 3) {
+              // The link keeps bouncing between page and download; stop it.
+              _snack('This link could not be opened or downloaded.');
+              return NavigationDecision.prevent;
+            }
+            if (attempts > 1 || uploadKindFor(uri.path) != null) {
+              unawaited(_saveDownload(uri));
               return NavigationDecision.prevent;
             }
             return NavigationDecision.navigate;
@@ -3560,11 +3830,9 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     final incoming = widget.sharedLink.trim();
     if (incoming.isEmpty) {
       _browser.loadHtmlString(_startPage);
+      WidgetsBinding.instance.addPostFrameCallback((_) => _showQuickPanel());
     } else {
       unawaited(_go(incoming));
-    }
-    if (incoming.isEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _showQuickPanel());
     }
   }
 
@@ -3575,19 +3843,14 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
     body { margin:0; min-height:100vh; display:grid; place-items:center;
-      font-family:Arial,sans-serif; color:#292633;
-      background:linear-gradient(145deg,#f7f6fa,#eeeafd); }
+      font-family:Roboto,Arial,sans-serif; color:#0a0a0a; background:#fff; }
     main { text-align:center; padding:32px; }
-    .mark { width:76px; height:76px; margin:auto; display:grid; place-items:center;
-      border-radius:24px; color:white; font-size:34px; font-weight:900;
-      background:linear-gradient(135deg,#7657ff,#ec4899);
-      box-shadow:0 18px 45px #7657ff44; }
-    h1 { margin:22px 0 8px; font-size:28px; }
-    p { margin:0; color:#716c7d; line-height:1.5; }
+    h1 { margin:0 0 8px; font-size:20px; font-weight:600; }
+    p { margin:0; color:#71717a; line-height:1.5; font-size:14px; }
   </style>
 </head>
-<body><main><div class="mark">N</div><h1>nexMusic Link Browser</h1>
-<p>Paste a link, search YouTube, or run one of your saved shortcuts.</p></main></body>
+<body><main><h1>Browser</h1>
+<p>Search, paste a link, or open YouTube.</p></main></body>
 </html>
 ''';
 
@@ -3605,7 +3868,83 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     if (input.trim().isEmpty) return;
     final destination = _destination(input);
     _addressController.text = destination.toString();
+    if (uploadKindFor(destination.path) != null) {
+      await _saveDownload(destination);
+      return;
+    }
     await _browser.loadRequest(destination);
+  }
+
+  void _snack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<String?> _readUserAgent() async {
+    try {
+      final value = await _browser.runJavaScriptReturningResult(
+        'navigator.userAgent',
+      );
+      return '$value'.replaceAll(RegExp(r'^"|"$'), '');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Downloads a song or video a page links to and opens the upload screen
+  /// with it. Links that turn out to be ordinary pages open in the browser.
+  Future<void> _saveDownload(Uri url) async {
+    if (_downloading) {
+      _snack('A download is already running.');
+      return;
+    }
+    setState(() {
+      _downloading = true;
+      _progress = 1;
+    });
+    _snack('Downloading for nexMusic…');
+    _userAgent ??= await _readUserAgent();
+    final result = await downloadBrowserMedia(
+      url,
+      referer: _currentPage,
+      userAgent: _userAgent,
+      onProgress: (fraction) {
+        final percent = (fraction * 100).round().clamp(1, 99);
+        if (mounted && percent != _progress) {
+          setState(() => _progress = percent);
+        }
+      },
+    );
+    if (!mounted) {
+      final orphan = result.path;
+      if (orphan != null) discardTemporaryCopy(orphan);
+      return;
+    }
+    setState(() {
+      _downloading = false;
+      _progress = 0;
+    });
+    if (result.isWebPage) {
+      await _browser.loadRequest(url);
+      return;
+    }
+    final filePath = result.path;
+    if (filePath == null) {
+      _snack(result.error ?? 'Download failed.');
+      return;
+    }
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(builder: (_) => UploadScreen(initialPaths: [filePath])),
+    );
+    // A running upload still needs the file; otherwise drop the cached copy.
+    if (!_music.uploads.any(
+      (item) => item.path == filePath || item.original?.path == filePath,
+    )) {
+      discardTemporaryCopy(filePath);
+    }
   }
 
   Future<void> _searchYouTube(String input) {
@@ -3639,58 +3978,41 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
             20,
             0,
             20,
-            24 + MediaQuery.viewInsetsOf(sheetContext).bottom,
+            20 + MediaQuery.viewInsetsOf(sheetContext).bottom,
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                'Quick actions',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+                'Shortcuts',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
               ),
-              const SizedBox(height: 6),
-              const Text('Save repeat searches or paste a link and run it.'),
-              const SizedBox(height: 18),
-              TextField(
-                controller: _firstPillController,
-                textInputAction: TextInputAction.go,
-                onSubmitted: (_) =>
-                    _runPill(sheetContext, _firstPillController),
-                decoration: InputDecoration(
-                  hintText: 'First quick search',
-                  prefixIcon: const Icon(Icons.link_rounded),
-                  suffixIcon: IconButton(
-                    tooltip: 'Run',
-                    onPressed: () =>
-                        _runPill(sheetContext, _firstPillController),
-                    icon: const Icon(Icons.arrow_forward_rounded),
-                  ),
-                  border: const OutlineInputBorder(
-                    borderRadius: BorderRadius.all(Radius.circular(999)),
+              const SizedBox(height: 4),
+              Text(
+                'Save searches or links you open often.',
+                style: TextStyle(color: _muted(sheetContext), fontSize: 13),
+              ),
+              const SizedBox(height: 16),
+              for (final controller in [
+                _firstPillController,
+                _secondPillController,
+              ]) ...[
+                TextField(
+                  controller: controller,
+                  textInputAction: TextInputAction.go,
+                  onSubmitted: (_) => _runPill(sheetContext, controller),
+                  decoration: InputDecoration(
+                    hintText: 'Search or link',
+                    suffixIcon: IconButton(
+                      tooltip: 'Run',
+                      onPressed: () => _runPill(sheetContext, controller),
+                      icon: const Icon(Icons.arrow_forward_rounded),
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _secondPillController,
-                textInputAction: TextInputAction.go,
-                onSubmitted: (_) =>
-                    _runPill(sheetContext, _secondPillController),
-                decoration: InputDecoration(
-                  hintText: 'Second quick search',
-                  prefixIcon: const Icon(Icons.search_rounded),
-                  suffixIcon: IconButton(
-                    tooltip: 'Run',
-                    onPressed: () =>
-                        _runPill(sheetContext, _secondPillController),
-                    icon: const Icon(Icons.arrow_forward_rounded),
-                  ),
-                  border: const OutlineInputBorder(
-                    borderRadius: BorderRadius.all(Radius.circular(999)),
-                  ),
-                ),
-              ),
+                const SizedBox(height: 10),
+              ],
             ],
           ),
         ),
@@ -3720,8 +4042,7 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
           onSubmitted: _go,
           decoration: const InputDecoration(
             hintText: 'Search or enter address',
-            prefixIcon: Icon(Icons.lock_outline_rounded, size: 19),
-            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            isDense: true,
           ),
         ),
         actions: [
@@ -3730,16 +4051,14 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
             onPressed: () => _go(_addressController.text),
             icon: const Icon(Icons.arrow_forward_rounded),
           ),
-          IconButton(
-            tooltip: 'Search YouTube',
-            onPressed: () => _searchYouTube(_addressController.text),
-            icon: const Icon(Icons.smart_display_rounded),
-          ),
         ],
         bottom: _progress > 0 && _progress < 100
             ? PreferredSize(
-                preferredSize: const Size.fromHeight(3),
-                child: LinearProgressIndicator(value: _progress / 100),
+                preferredSize: const Size.fromHeight(2),
+                child: LinearProgressIndicator(
+                  value: _progress / 100,
+                  minHeight: 2,
+                ),
               )
             : null,
       ),
@@ -3747,7 +4066,7 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
       bottomNavigationBar: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           child: Row(
             children: [
               IconButton(
@@ -3773,13 +4092,12 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
                 icon: const Icon(Icons.home_outlined),
               ),
               const Spacer(),
-              FilledButton.tonalIcon(
+              IconButton(
+                tooltip: 'Search YouTube',
                 onPressed: () => _searchYouTube(_addressController.text),
                 icon: const Icon(Icons.smart_display_rounded),
-                label: const Text('YouTube'),
               ),
-              const SizedBox(width: 8),
-              IconButton.filledTonal(
+              IconButton(
                 tooltip: 'Shortcuts',
                 onPressed: _showQuickPanel,
                 icon: const Icon(Icons.bolt_rounded),
@@ -3790,799 +4108,4 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
       ),
     );
   }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// OWNED MEDIA EDITOR
-// ─────────────────────────────────────────────────────────────────────────────
-
-class OwnedMediaEditorScreen extends StatefulWidget {
-  const OwnedMediaEditorScreen({
-    super.key,
-    required this.source,
-    required this.suggestedName,
-  });
-  final String source, suggestedName;
-
-  @override
-  State<OwnedMediaEditorScreen> createState() => _OwnedMediaEditorScreenState();
-}
-
-class _OwnedMediaEditorScreenState extends State<OwnedMediaEditorScreen> {
-  static const _mediaChannel = MethodChannel('com.thenex.nexmusic/media_tools');
-  final _preview = AudioPlayer();
-  late final TextEditingController _titleController;
-  StreamSubscription<Duration>? _positionSub;
-  double _durationSeconds = 180, _startSeconds = 0, _endSeconds = 30;
-  String? _folderId, _exportPath, _error;
-  bool _permitted = false, _processing = false, _previewing = false;
-
-  @override
-  void initState() {
-    super.initState();
-    final baseName = widget.suggestedName.replaceAll(RegExp(r'\.[^.]+$'), '');
-    _titleController = TextEditingController(text: baseName);
-    _positionSub = _preview.positionStream.listen((position) {
-      if (position.inMilliseconds >= _endSeconds * 1000 && _preview.playing) {
-        _preview.pause();
-        if (mounted) setState(() => _previewing = false);
-      }
-    });
-    _loadPreview();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final folders = context.read<MusicController>().mediaFolders;
-      if (mounted && folders.isNotEmpty) {
-        setState(() => _folderId = folders.first.id);
-      }
-    });
-  }
-
-  Future<void> _loadPreview() async {
-    try {
-      final foundDuration = await _preview.setUrl(widget.source);
-      if (!mounted || foundDuration == null) return;
-      setState(() {
-        _durationSeconds = math.max(1, foundDuration.inMilliseconds / 1000);
-        _endSeconds = math.min(_durationSeconds, 30);
-      });
-    } catch (_) {
-      if (mounted) {
-        setState(
-          () => _error =
-              'Preview unavailable; extraction may still work on Android.',
-        );
-      }
-    }
-  }
-
-  Future<void> _togglePreview() async {
-    if (_preview.playing) {
-      await _preview.pause();
-      if (!mounted) return;
-      setState(() => _previewing = false);
-      return;
-    }
-    await _preview.seek(Duration(milliseconds: (_startSeconds * 1000).round()));
-    if (!mounted) return;
-    await _preview.play();
-    if (mounted) setState(() => _previewing = true);
-  }
-
-  Future<void> _processAndSave() async {
-    if (!_permitted || _folderId == null) return;
-    setState(() {
-      _processing = true;
-      _error = null;
-    });
-    try {
-      await _preview.pause();
-      _exportPath = await _mediaChannel
-          .invokeMethod<String>('extractAndTrimAudio', {
-            'source': widget.source,
-            'startMs': (_startSeconds * 1000).round(),
-            'endMs': (_endSeconds * 1000).round(),
-          });
-      if (_exportPath == null) throw StateError('No export was created.');
-      if (!mounted) return;
-      final uploaded = await context.read<MusicController>().uploadOwnedAudio(
-        filePath: _exportPath!,
-        title: _titleController.text.trim().isEmpty
-            ? 'Imported audio'
-            : _titleController.text.trim(),
-        folderId: _folderId!,
-      );
-      if (mounted && uploaded) Navigator.pop(context);
-    } on PlatformException catch (e) {
-      if (mounted) setState(() => _error = e.message ?? e.code);
-    } catch (e) {
-      if (mounted) setState(() => _error = '$e');
-    } finally {
-      if (mounted) setState(() => _processing = false);
-    }
-  }
-
-  Future<void> _uploadOriginal() async {
-    if (!_permitted || _folderId == null) return;
-    final ext = widget.suggestedName.split('.').last.toLowerCase();
-    final isVideo = const {'mp4', 'mov'}.contains(ext);
-    final contentType = switch (ext) {
-      'mov' => 'video/quicktime',
-      'mp4' => 'video/mp4',
-      'mp3' => 'audio/mpeg',
-      'aac' => 'audio/aac',
-      _ => 'audio/mp4',
-    };
-    setState(() {
-      _processing = true;
-      _error = null;
-    });
-    try {
-      await _preview.pause();
-      if (!mounted) return;
-      final uploaded = await context.read<MusicController>().uploadOwnedMedia(
-        filePath: widget.source,
-        title: _titleController.text.trim().isEmpty
-            ? 'Imported media'
-            : _titleController.text.trim(),
-        folderId: _folderId!,
-        kind: isVideo ? 'video' : 'audio',
-        contentType: contentType,
-      );
-      if (mounted && uploaded) Navigator.pop(context);
-    } catch (e) {
-      if (mounted) setState(() => _error = '$e');
-    } finally {
-      if (mounted) setState(() => _processing = false);
-    }
-  }
-
-  @override
-  void dispose() {
-    _positionSub?.cancel();
-    _preview.dispose();
-    _titleController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final editorState = context
-        .select<
-          MusicController,
-          ({List<MediaFolder> folders, bool configured})
-        >(
-          (music) => (
-            folders: music.mediaFolders,
-            configured: music.backendConfigured,
-          ),
-        );
-    return Scaffold(
-      appBar: AppBar(title: const Text('Edit & upload media')),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 34),
-        children: [
-          Container(
-            height: 170,
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [Color(0xFF16736D), Color(0xFF7657FF)],
-              ),
-              borderRadius: BorderRadius.circular(27),
-            ),
-            child: CustomPaint(
-              painter: _WavePainter(),
-              child: const Center(
-                child: Icon(
-                  Icons.graphic_eq_rounded,
-                  color: Colors.white,
-                  size: 64,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 20),
-          TextField(
-            controller: _titleController,
-            decoration: const InputDecoration(
-              labelText: 'Media title',
-              prefixIcon: Icon(Icons.music_note_rounded),
-            ),
-          ),
-          const SizedBox(height: 20),
-          Row(
-            children: [
-              const Text(
-                'Trim range',
-                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-              ),
-              const Spacer(),
-              Text(
-                '${_time(Duration(milliseconds: (_startSeconds * 1000).round()))} – '
-                '${_time(Duration(milliseconds: (_endSeconds * 1000).round()))}',
-                style: const TextStyle(
-                  color: NexMusicApp.violet,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-          RangeSlider(
-            values: RangeValues(_startSeconds, _endSeconds),
-            min: 0,
-            max: _durationSeconds,
-            divisions: math.max(1, _durationSeconds.round()),
-            labels: RangeLabels(
-              _time(Duration(milliseconds: (_startSeconds * 1000).round())),
-              _time(Duration(milliseconds: (_endSeconds * 1000).round())),
-            ),
-            onChanged: (values) => setState(() {
-              _startSeconds = values.start;
-              _endSeconds = values.end;
-            }),
-          ),
-          OutlinedButton.icon(
-            onPressed: _togglePreview,
-            icon: Icon(
-              _previewing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-            ),
-            label: Text(_previewing ? 'Pause preview' : 'Preview selection'),
-          ),
-          const SizedBox(height: 16),
-          _FolderSelector(
-            folders: editorState.folders,
-            value: _folderId,
-            onChanged: (value) => setState(() => _folderId = value),
-          ),
-          CheckboxListTile(
-            contentPadding: EdgeInsets.zero,
-            value: _permitted,
-            onChanged: (value) => setState(() => _permitted = value ?? false),
-            title: const Text(
-              'I own this media or have permission to process it',
-              style: TextStyle(fontWeight: FontWeight.w700),
-            ),
-            subtitle: const Text(
-              'Only local, authorized media can be extracted.',
-            ),
-            controlAffinity: ListTileControlAffinity.leading,
-          ),
-          if (_error != null)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Text(
-                _error!,
-                style: const TextStyle(color: Colors.orange),
-              ),
-            ),
-          if (_exportPath != null && !editorState.configured)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: SelectableText(
-                'Local export ready: $_exportPath',
-                style: const TextStyle(color: Colors.grey, fontSize: 12),
-              ),
-            ),
-          FilledButton.icon(
-            onPressed: !_permitted || _processing ? null : _processAndSave,
-            icon: _processing
-                ? const SizedBox.square(
-                    dimension: 19,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.cloud_upload_outlined),
-            label: Text(_processing ? 'Processing…' : 'Extract, trim & save'),
-          ),
-          const SizedBox(height: 10),
-          OutlinedButton.icon(
-            onPressed: !_permitted || _processing ? null : _uploadOriginal,
-            icon: const Icon(Icons.backup_outlined),
-            label: const Text('Upload original audio/video'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// FOLDER SELECTOR
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _FolderSelector extends StatelessWidget {
-  const _FolderSelector({
-    required this.folders,
-    required this.value,
-    required this.onChanged,
-  });
-  final List<MediaFolder> folders;
-  final String? value;
-  final ValueChanged<String?> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    MediaFolder? selectedFolder;
-    for (final folder in folders) {
-      if (folder.id == value) {
-        selectedFolder = folder;
-        break;
-      }
-    }
-    return Row(
-      children: [
-        Expanded(
-          child: DropdownButtonFormField<String>(
-            initialValue: selectedFolder == null ? null : value,
-            decoration: const InputDecoration(
-              labelText: 'Save in folder',
-              prefixIcon: Icon(Icons.folder_outlined),
-            ),
-            items: folders
-                .map((f) => DropdownMenuItem(value: f.id, child: Text(f.name)))
-                .toList(),
-            onChanged: onChanged,
-          ),
-        ),
-        const SizedBox(width: 8),
-        IconButton.filledTonal(
-          tooltip: 'New folder',
-          onPressed: () async {
-            final name = await _folderNameDialog(
-              context,
-              title: 'New media folder',
-              action: 'Create',
-              hintText: 'e.g. Workout clips',
-            );
-            if (!context.mounted || name == null) return;
-            final folder = await context
-                .read<MusicController>()
-                .createMediaFolder(name);
-            if (folder != null) onChanged(folder.id);
-          },
-          icon: const Icon(Icons.create_new_folder_outlined),
-        ),
-        const SizedBox(width: 4),
-        PopupMenuButton<String>(
-          tooltip: 'Folder options',
-          enabled: selectedFolder != null,
-          icon: const Icon(Icons.more_vert_rounded),
-          onSelected: (action) async {
-            final folder = selectedFolder;
-            if (folder == null) return;
-            final music = context.read<MusicController>();
-            if (action == 'rename') {
-              final name = await _folderNameDialog(
-                context,
-                title: 'Rename folder',
-                action: 'Save',
-                initialValue: folder.name,
-              );
-              if (!context.mounted || name == null) return;
-              await music.updateMediaFolder(folder, name);
-              return;
-            }
-            if (action == 'delete') {
-              final confirmed = await showDialog<bool>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  title: const Text('Delete folder?'),
-                  content: const Text(
-                    'Only empty folders can be deleted. Saved items stay safe.',
-                  ),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(ctx, false),
-                      child: const Text('Cancel'),
-                    ),
-                    FilledButton(
-                      onPressed: () => Navigator.pop(ctx, true),
-                      child: const Text('Delete'),
-                    ),
-                  ],
-                ),
-              );
-              if (!context.mounted || confirmed != true) return;
-              final deleted = await music.deleteMediaFolder(folder);
-              if (!deleted) return;
-              for (final candidate in music.mediaFolders) {
-                onChanged(candidate.id);
-                break;
-              }
-            }
-          },
-          itemBuilder: (_) => const [
-            PopupMenuItem(
-              value: 'rename',
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.drive_file_rename_outline_rounded),
-                title: Text('Rename folder'),
-              ),
-            ),
-            PopupMenuItem(
-              value: 'delete',
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.delete_outline_rounded),
-                title: Text('Delete folder'),
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-}
-
-class _WavePainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.28)
-      ..strokeWidth = 3
-      ..strokeCap = StrokeCap.round;
-    for (double x = 10; x < size.width; x += 8) {
-      final h = 18 + math.sin(x * 0.12).abs() * 55;
-      canvas.drawLine(
-        Offset(x, (size.height - h) / 2),
-        Offset(x, (size.height + h) / 2),
-        paint,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SHARED UI WIDGETS
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _SectionTitle extends StatelessWidget {
-  const _SectionTitle({required this.title, this.compact = false});
-  final String title;
-  final bool compact;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: EdgeInsets.fromLTRB(20, compact ? 18 : 26, 20, 12),
-    child: Row(
-      children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: -0.3,
-                ),
-              ),
-            ],
-          ),
-        ),
-        if (!compact)
-          TextButton(onPressed: () {}, child: const Text('See all')),
-      ],
-    ),
-  );
-}
-
-class _Brand extends StatelessWidget {
-  const _Brand({this.light = false});
-  final bool light;
-
-  @override
-  Widget build(BuildContext context) => Row(
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: Image.asset(
-          'assets/branding/nexmusic-logo.png',
-          width: 44,
-          height: 44,
-          fit: BoxFit.contain,
-        ),
-      ),
-      const SizedBox(width: 10),
-      Text(
-        'nexMusic',
-        style: TextStyle(
-          color: light ? Colors.white : null,
-          fontSize: 21,
-          fontWeight: FontWeight.w800,
-          letterSpacing: -0.3,
-        ),
-      ),
-    ],
-  );
-}
-
-class _EmptyState extends StatelessWidget {
-  const _EmptyState({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-  });
-  final IconData icon;
-  final String title, subtitle;
-
-  @override
-  Widget build(BuildContext context) => Center(
-    child: Padding(
-      padding: const EdgeInsets.all(35),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: NexMusicApp.violet.withValues(alpha: 0.1),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(
-              icon,
-              size: 44,
-              color: NexMusicApp.violet.withValues(alpha: 0.6),
-            ),
-          ),
-          const SizedBox(height: 20),
-          Text(
-            title,
-            style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            subtitle,
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: Colors.grey, height: 1.45),
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// BOTTOM SHEETS & DIALOGS
-// ─────────────────────────────────────────────────────────────────────────────
-
-Future<String?> _folderNameDialog(
-  BuildContext context, {
-  required String title,
-  required String action,
-  String? hintText,
-  String? initialValue,
-}) async {
-  final controller = TextEditingController(text: initialValue);
-  final result = await showDialog<String>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: Text(title),
-      content: TextField(
-        controller: controller,
-        autofocus: true,
-        decoration: InputDecoration(hintText: hintText),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(ctx, controller.text),
-          child: Text(action),
-        ),
-      ],
-    ),
-  );
-  controller.dispose();
-  final trimmed = result?.trim();
-  return (trimmed == null || trimmed.isEmpty) ? null : trimmed;
-}
-
-void _showImportMenu(BuildContext context) {
-  showModalBottomSheet<void>(
-    context: context,
-    showDragHandle: true,
-    builder: (sheetContext) => Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const ListTile(
-            title: Text(
-              'Add to nexMusic',
-              style: TextStyle(fontSize: 21, fontWeight: FontWeight.w800),
-            ),
-            subtitle: Text('Save a link, upload your own file, or trim audio'),
-          ),
-          ListTile(
-            leading: Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: NexMusicApp.violet.withValues(alpha: 0.14),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(Icons.link_rounded, color: NexMusicApp.violet),
-            ),
-            title: const Text(
-              'Save YouTube or web link',
-              style: TextStyle(fontWeight: FontWeight.w600),
-            ),
-            subtitle: const Text('Bookmark the original URL in your folders'),
-            onTap: () {
-              Navigator.pop(sheetContext);
-              Navigator.push<void>(
-                context,
-                MaterialPageRoute(
-                  builder: (_) =>
-                      const SharedImportScreen(source: '', isLocalMedia: false),
-                ),
-              );
-            },
-          ),
-          ListTile(
-            leading: Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: const Color(0xFF16736D).withValues(alpha: 0.14),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                Icons.video_file_outlined,
-                color: Color(0xFF16736D),
-              ),
-            ),
-            title: const Text(
-              'Upload my own media',
-              style: TextStyle(fontWeight: FontWeight.w600),
-            ),
-            subtitle: const Text('Private audio/video with optional trimming'),
-            onTap: () async {
-              final file = await FilePicker.pickFile(
-                type: FileType.custom,
-                allowedExtensions: const ['mp4', 'mov', 'm4a', 'aac', 'mp3'],
-              );
-              final source = file?.path;
-              if (!context.mounted || file == null || source == null) return;
-              Navigator.pop(sheetContext);
-              Navigator.push<void>(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => OwnedMediaEditorScreen(
-                    source: source,
-                    suggestedName: file.name,
-                  ),
-                ),
-              );
-            },
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-void _simpleSheet(BuildContext context, String title, String body) {
-  showModalBottomSheet<void>(
-    context: context,
-    showDragHandle: true,
-    builder: (context) => Padding(
-      padding: const EdgeInsets.fromLTRB(24, 4, 24, 34),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: 10),
-          Text(body, style: const TextStyle(color: Colors.grey, height: 1.45)),
-        ],
-      ),
-    ),
-  );
-}
-
-void _lyricsSheet(BuildContext context, Track track) {
-  showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    showDragHandle: true,
-    builder: (context) => DraggableScrollableSheet(
-      expand: false,
-      initialChildSize: 0.72,
-      maxChildSize: 0.92,
-      builder: (_, controller) => ListView(
-        controller: controller,
-        padding: const EdgeInsets.fromLTRB(24, 4, 24, 40),
-        children: [
-          Text(
-            track.title,
-            style: const TextStyle(fontSize: 25, fontWeight: FontWeight.w800),
-          ),
-          Text(track.artist, style: const TextStyle(color: Colors.grey)),
-          const SizedBox(height: 30),
-          const Text(
-            'Lyrics will appear here',
-            style: TextStyle(
-              fontSize: 27,
-              height: 1.7,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 10),
-          const Text(
-            'Connect your licensed lyrics provider later. The player UI and synchronized scrolling area are ready.',
-            style: TextStyle(color: Colors.grey, fontSize: 17, height: 1.65),
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-void _queueSheet(BuildContext context) {
-  showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    showDragHandle: true,
-    builder: (context) => DraggableScrollableSheet(
-      expand: false,
-      initialChildSize: 0.72,
-      maxChildSize: 0.92,
-      builder: (_, controller) => Consumer<MusicController>(
-        builder: (_, music, _) {
-          final queue = music.queue;
-          return Column(
-            children: [
-              const Padding(
-                padding: EdgeInsets.fromLTRB(20, 0, 20, 12),
-                child: Row(
-                  children: [
-                    Text(
-                      'Up next',
-                      style: TextStyle(
-                        fontSize: 23,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        'Playing from nexMusic Mix',
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        textAlign: TextAlign.end,
-                        style: TextStyle(color: Colors.grey, fontSize: 11),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: ListView.builder(
-                  controller: controller,
-                  itemCount: queue.length,
-                  itemBuilder: (context, i) => Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 14),
-                    child: SongTile(
-                      track: queue[i],
-                      number: i + 1,
-                      queue: queue,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          );
-        },
-      ),
-    ),
-  );
 }

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Home screen widgets follow the app's monochrome + violet look. -->
+    <color name="widget_surface">#FFFFFF</color>
+    <color name="widget_line">#E4E4E7</color>
+    <color name="widget_fill">#F4F4F5</color>
+    <color name="widget_ink">#0A0A0A</color>
+    <color name="widget_muted">#71717A</color>
+    <color name="widget_accent">#7C3AED</color>
+    <color name="widget_accent_soft">#1F7C3AED</color>
+</resources>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A simple globe: outer ring, meridian ring and equator. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="@color/widget_ink"
+        android:fillType="evenOdd"
+        android:pathData="M2,12A10,10 0,1 1,22 12A10,10 0,1 1,2 12ZM4,12A8,8 0,1 0,20 12A8,8 0,1 0,4 12Z" />
+    <path
+        android:fillColor="@color/widget_ink"
+        android:fillType="evenOdd"
+        android:pathData="M12,2C14.8,4.7 16.2,8.2 16.2,12C16.2,15.8 14.8,19.3 12,22C9.2,19.3 7.8,15.8 7.8,12C7.8,8.2 9.2,4.7 12,2ZM12,5C10.6,7 10,9.4 10,12C10,14.6 10.6,17 12,19C13.4,17 14,14.6 14,12C14,9.4 13.4,7 12,5Z" />
+    <path
+        android:fillColor="@color/widget_ink"
+        android:pathData="M2.5,11H21.5V13H2.5Z" />
+</vector>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Resources that libraries look up by name, which the resource shrinker cannot
+  see:
+  - ic_notification: audio_service and Firebase Messaging.
+  - default_web_client_id: Google sign-in ("serverClientId must be provided on
+    Android" when it is stripped).
+  - The other strings come from google-services.json and are read by Firebase.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_notification,@string/default_web_client_id,@string/gcm_defaultSenderId,@string/google_api_key,@string/google_app_id,@string/google_crash_reporting_api_key,@string/google_storage_bucket,@string/project_id" />

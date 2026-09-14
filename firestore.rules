@@ -1,8 +1,92 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
     function isOwner(userId) {
-      return request.auth != null && request.auth.uid == userId;
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function validCategoryName(name) {
+      return name is string && name.size() > 0 && name.size() <= 40;
+    }
+
+    function validTitle(title) {
+      return title is string && title.size() > 0 && title.size() <= 160;
+    }
+
+    function categoryExists(categoryId) {
+      return categoryId is string
+        && exists(/databases/$(database)/documents/categories/$(categoryId));
+    }
+
+    // Shared categories: any signed-in user can create one; only its creator
+    // can rename or delete it.
+    match /categories/{categoryId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['name', 'ownerUid', 'createdAt'])
+        && request.resource.data.ownerUid == request.auth.uid
+        && validCategoryName(request.resource.data.name)
+        && request.resource.data.createdAt == request.time;
+      allow update: if isOwner(resource.data.ownerUid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
+        && validCategoryName(request.resource.data.name);
+      allow delete: if isOwner(resource.data.ownerUid);
+    }
+
+    // Listing of public uploads stored on Cloudinary. Every signed-in listener
+    // can read it and rename, move or remove any entry. Entries are
+    // soft-deleted so other phones can sync the removal without re-reading the
+    // whole catalogue.
+    match /songs/{songId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly([
+          'title', 'kind', 'categoryId', 'url', 'publicId', 'sizeBytes',
+          'durationMs', 'ownerUid', 'ownerName', 'createdAt', 'updatedAt',
+          'deleted'
+        ])
+        && request.resource.data.ownerUid == request.auth.uid
+        && validTitle(request.resource.data.title)
+        && request.resource.data.kind in ['audio', 'video']
+        && categoryExists(request.resource.data.categoryId)
+        && request.resource.data.url is string
+        && request.resource.data.url.matches('https://res[.]cloudinary[.]com/.+')
+        && request.resource.data.publicId is string
+        && request.resource.data.publicId.size() > 0
+        && request.resource.data.publicId.size() <= 300
+        && request.resource.data.sizeBytes is int
+        && request.resource.data.sizeBytes > 0
+        && request.resource.data.sizeBytes < 100 * 1024 * 1024
+        && request.resource.data.durationMs is int
+        && request.resource.data.ownerName is string
+        && request.resource.data.ownerName.size() <= 80
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.deleted == false;
+      allow update: if signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'categoryId', 'deleted', 'updatedAt'])
+        && validTitle(request.resource.data.title)
+        && categoryExists(request.resource.data.categoryId)
+        && request.resource.data.deleted is bool
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // Phones that get activity notifications. The push Worker reads these
+    // with its service account; a phone can only register or remove its own.
+    match /pushTokens/{phoneId} {
+      allow create, update: if signedIn()
+        && request.resource.data.keys().hasOnly(['uid', 'token', 'updatedAt'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.token is string
+        && request.resource.data.token.size() > 0
+        && request.resource.data.token.size() < 4096
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid;
     }
 
     match /users/{userId}/folders/{folderId} {
@@ -20,9 +104,7 @@ service cloud.firestore {
         && request.resource.data.keys().hasOnly([
           'title', 'kind', 'folderId', 'sourceUrl', 'storagePath', 'createdAt'
         ])
-        && request.resource.data.title is string
-        && request.resource.data.title.size() > 0
-        && request.resource.data.title.size() <= 160
+        && validTitle(request.resource.data.title)
         && request.resource.data.kind in ['link', 'audio', 'video']
         && request.resource.data.folderId is string;
     }

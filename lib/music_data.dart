@@ -1,48 +1,168 @@
-import 'package:flutter/material.dart';
+/// Prefix for ids of private library items wrapped in a [Song] for playback.
+const privateSongPrefix = 'private-';
 
-class Track {
-  const Track({
+/// A shared category. Any signed-in user can create one; only its creator can
+/// rename or delete it.
+class MusicCategory {
+  const MusicCategory({
+    required this.id,
+    required this.name,
+    required this.ownerUid,
+  });
+  final String id, name, ownerUid;
+}
+
+/// A playable audio or video item.
+///
+/// Public uploads are stored on Cloudinary and listed in the shared `songs`
+/// collection. Private library files are wrapped in a [Song] only while they
+/// play.
+class Song {
+  const Song({
     required this.id,
     required this.title,
-    required this.artist,
-    required this.album,
-    required this.duration,
+    required this.kind,
     required this.url,
-    required this.colors,
-    this.explicit = false,
+    this.categoryId = '',
+    this.ownerUid = '',
+    this.ownerName = '',
+    this.publicId,
+    this.storagePath,
+    this.sizeBytes = 0,
+    this.createdAt,
   });
-  final String id, title, artist, album, url;
-  final Duration duration;
-  final List<Color> colors;
-  final bool explicit;
+  final String id, title, kind, url, categoryId, ownerUid, ownerName;
+
+  /// Cloudinary id of a public upload.
+  final String? publicId;
+
+  /// Firebase Storage path of a private library file.
+  final String? storagePath;
+  final int sizeBytes;
+  final DateTime? createdAt;
+
+  bool get isVideo => kind == 'video';
+  bool get isPrivate => id.startsWith(privateSongPrefix);
+
+  Song copyWith({String? title, String? categoryId, String? url}) => Song(
+    id: id,
+    title: title ?? this.title,
+    kind: kind,
+    url: url ?? this.url,
+    categoryId: categoryId ?? this.categoryId,
+    ownerUid: ownerUid,
+    ownerName: ownerName,
+    publicId: publicId,
+    storagePath: storagePath,
+    sizeBytes: sizeBytes,
+    createdAt: createdAt,
+  );
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'title': title,
+    'kind': kind,
+    'url': url,
+    'categoryId': categoryId,
+    'ownerUid': ownerUid,
+    'ownerName': ownerName,
+    'publicId': publicId,
+    'sizeBytes': sizeBytes,
+    'createdAt': createdAt?.millisecondsSinceEpoch,
+  };
+
+  /// Reads a song saved by [toJson], or returns null for an unusable entry.
+  static Song? fromJson(Map<String, dynamic> json) {
+    final id = json['id'];
+    final url = json['url'];
+    if (id is! String || id.isEmpty || url is! String || url.isEmpty) {
+      return null;
+    }
+    final createdAt = json['createdAt'];
+    return Song(
+      id: id,
+      title: json['title'] as String? ?? 'Untitled',
+      kind: json['kind'] == 'video' ? 'video' : 'audio',
+      url: url,
+      categoryId: json['categoryId'] as String? ?? '',
+      ownerUid: json['ownerUid'] as String? ?? '',
+      ownerName: json['ownerName'] as String? ?? '',
+      publicId: json['publicId'] as String?,
+      sizeBytes: (json['sizeBytes'] as num?)?.toInt() ?? 0,
+      createdAt: createdAt is int
+          ? DateTime.fromMillisecondsSinceEpoch(createdAt)
+          : null,
+    );
+  }
 }
 
-class MusicCollection {
-  const MusicCollection({
-    required this.id,
-    required this.title,
-    required this.subtitle,
-    required this.trackIds,
-    required this.colors,
-  });
-  final String id, title, subtitle;
-  final List<String> trackIds;
-  final List<Color> colors;
-}
+enum UploadStatus { queued, uploading, done, skipped, failed }
 
-class MoodStation {
-  const MoodStation({
-    required this.id,
+/// One file in the public upload queue. The controller updates it in place
+/// and notifies its listeners.
+class UploadItem {
+  UploadItem({
+    required this.path,
+    required this.name,
+    required this.sizeBytes,
     required this.title,
-    required this.subtitle,
-    required this.icon,
-    required this.trackIds,
-    required this.colors,
   });
-  final String id, title, subtitle;
-  final IconData icon;
-  final List<String> trackIds;
-  final List<Color> colors;
+
+  /// The file that will be uploaded; a trimmed copy once [applyTrim] ran.
+  String path, name;
+  int sizeBytes;
+  String title;
+
+  /// The picked file before trimming, kept so a trim can be redone or undone.
+  ({String path, String name, int sizeBytes})? original;
+  Duration? trimStart, trimEnd;
+
+  bool get trimmed => original != null;
+
+  /// Swaps in a trimmed copy of the original file.
+  void applyTrim({
+    required String trimmedPath,
+    required int trimmedSize,
+    required Duration start,
+    required Duration end,
+  }) {
+    final source = original ??= (path: path, name: name, sizeBytes: sizeBytes);
+    final extension =
+        RegExp(r'\.[^./\\]+$').firstMatch(trimmedPath)?.group(0) ?? '';
+    name = '${source.name.replaceAll(RegExp(r'\.[^.]+$'), '')}$extension';
+    path = trimmedPath;
+    sizeBytes = trimmedSize;
+    trimStart = start;
+    trimEnd = end;
+  }
+
+  /// Goes back to the picked file and returns the trimmed copy it replaced.
+  String? undoTrim() {
+    final source = original;
+    if (source == null) return null;
+    final trimmedPath = path;
+    path = source.path;
+    name = source.name;
+    sizeBytes = source.sizeBytes;
+    original = null;
+    trimStart = null;
+    trimEnd = null;
+    return trimmedPath;
+  }
+  String categoryId = '';
+  UploadStatus status = UploadStatus.queued;
+
+  /// Fraction (0–1) of this file sent to Cloudinary.
+  double progress = 0;
+  String? error;
+
+  /// Set once the file reached Cloudinary, so a retry only repeats the
+  /// Firestore write instead of uploading the file again.
+  String? uploadedUrl, uploadedPublicId;
+  int durationMs = 0;
+
+  bool get finished =>
+      status != UploadStatus.queued && status != UploadStatus.uploading;
 }
 
 class MediaFolder {
@@ -79,151 +199,3 @@ class SavedMedia {
     storagePath: storagePath ?? this.storagePath,
   );
 }
-
-const tracks = <Track>[
-  Track(
-    id: 'midnight',
-    title: 'Midnight Drive',
-    artist: 'Aarav Ray',
-    album: 'After Hours',
-    duration: Duration(minutes: 4, seconds: 42),
-    url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
-    colors: [Color(0xFF4B2BBE), Color(0xFFFF4F9A)],
-  ),
-  Track(
-    id: 'baarish',
-    title: 'Baarish Ki Baat',
-    artist: 'Mira Sen',
-    album: 'Monsoon Letters',
-    duration: Duration(minutes: 3, seconds: 58),
-    url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3',
-    colors: [Color(0xFF096A76), Color(0xFF36D1C4)],
-  ),
-  Track(
-    id: 'city',
-    title: 'City Lights',
-    artist: 'Neon Valley',
-    album: 'Electric Hearts',
-    duration: Duration(minutes: 5, seconds: 4),
-    url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3',
-    colors: [Color(0xFF132B5B), Color(0xFF4A9DFF)],
-  ),
-  Track(
-    id: 'safar',
-    title: 'Safar',
-    artist: 'Kabir & Co.',
-    album: 'Open Roads',
-    duration: Duration(minutes: 4, seconds: 16),
-    url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3',
-    colors: [Color(0xFFF0753C), Color(0xFFFFD36E)],
-  ),
-  Track(
-    id: 'orbit',
-    title: 'Orbit',
-    artist: 'Lunar Club',
-    album: 'Zero Gravity',
-    duration: Duration(minutes: 6, seconds: 12),
-    url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3',
-    colors: [Color(0xFF121422), Color(0xFF8B6DFF)],
-  ),
-  Track(
-    id: 'khwaab',
-    title: 'Khwaab',
-    artist: 'Rhea Malhotra',
-    album: 'Soft Focus',
-    duration: Duration(minutes: 3, seconds: 36),
-    url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-6.mp3',
-    colors: [Color(0xFFB02D62), Color(0xFFFF91B9)],
-  ),
-  Track(
-    id: 'slow',
-    title: 'Slow Sunday',
-    artist: 'The Paper Planes',
-    album: 'Good Morning',
-    duration: Duration(minutes: 4, seconds: 27),
-    url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-7.mp3',
-    colors: [Color(0xFF68713B), Color(0xFFD2DD87)],
-  ),
-  Track(
-    id: 'higher',
-    title: 'Higher Ground',
-    artist: 'Nova Bloom',
-    album: 'Bloom',
-    duration: Duration(minutes: 5, seconds: 18),
-    url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3',
-    colors: [Color(0xFF74309B), Color(0xFFE96DF1)],
-    explicit: true,
-  ),
-];
-
-const collections = <MusicCollection>[
-  MusicCollection(
-    id: 'daily',
-    title: 'Daily Mix 01',
-    subtitle: 'Aarav Ray, Mira Sen, Kabir & Co.',
-    trackIds: ['midnight', 'baarish', 'safar', 'khwaab'],
-    colors: [Color(0xFF6C46EF), Color(0xFFFF4F9A)],
-  ),
-  MusicCollection(
-    id: 'chill',
-    title: 'Chill Station',
-    subtitle: 'Soft beats for slower days',
-    trackIds: ['slow', 'khwaab', 'baarish'],
-    colors: [Color(0xFF12726F), Color(0xFF75E6C8)],
-  ),
-  MusicCollection(
-    id: 'neon',
-    title: 'Neon Nights',
-    subtitle: 'Synth, electronic and indie pop',
-    trackIds: ['city', 'orbit', 'higher', 'midnight'],
-    colors: [Color(0xFF18214A), Color(0xFF5E7CFF)],
-  ),
-  MusicCollection(
-    id: 'roads',
-    title: 'Open Roads',
-    subtitle: 'Made for long drives',
-    trackIds: ['safar', 'midnight', 'higher'],
-    colors: [Color(0xFFB54827), Color(0xFFFFC75B)],
-  ),
-];
-
-const moodStations = <MoodStation>[
-  MoodStation(
-    id: 'focus-flow',
-    title: 'Focus Flow',
-    subtitle: 'Clean, low-friction tracks for work',
-    icon: Icons.psychology_alt_rounded,
-    trackIds: ['orbit', 'slow', 'city'],
-    colors: [Color(0xFF1B5A7A), Color(0xFF6FE3C1)],
-  ),
-  MoodStation(
-    id: 'late-drive',
-    title: 'Late Drive',
-    subtitle: 'Night-road energy without the clutter',
-    icon: Icons.route_rounded,
-    trackIds: ['midnight', 'city', 'safar', 'higher'],
-    colors: [Color(0xFF5938C8), Color(0xFFFF6AA2)],
-  ),
-  MoodStation(
-    id: 'reset',
-    title: 'Soft Reset',
-    subtitle: 'Gentle songs when everything feels loud',
-    icon: Icons.spa_rounded,
-    trackIds: ['khwaab', 'baarish', 'slow'],
-    colors: [Color(0xFF0F766E), Color(0xFFB9E769)],
-  ),
-  MoodStation(
-    id: 'boost',
-    title: 'Boost',
-    subtitle: 'Fast picks for walks and workouts',
-    icon: Icons.bolt_rounded,
-    trackIds: ['higher', 'safar', 'midnight'],
-    colors: [Color(0xFFD94B4B), Color(0xFFFFC85C)],
-  ),
-];
-
-Track trackById(String id) => tracks.firstWhere((track) => track.id == id);
-List<Track> tracksFor(MusicCollection list) =>
-    list.trackIds.map(trackById).toList();
-List<Track> stationTracks(MoodStation station) =>
-    station.trackIds.map(trackById).toList();

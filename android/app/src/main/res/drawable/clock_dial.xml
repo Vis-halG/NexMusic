@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Analog clock face. The hands use the same 180dp size so they line up. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="180dp"
+    android:height="180dp"
+    android:viewportWidth="100"
+    android:viewportHeight="100">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M50,2A48,48 0,1 1,50 98A48,48 0,1 1,50 2Z" />
+    <path
+        android:fillColor="#FF7C3AED"
+        android:fillType="evenOdd"
+        android:pathData="M50,2A48,48 0,1 1,50 98A48,48 0,1 1,50 2ZM50,5A45,45 0,1 0,50 95A45,45 0,1 0,50 5Z" />
+    <path
+        android:fillColor="#FF7C3AED"
+        android:pathData="M48.5,9h3v9h-3zM82,48.5h9v3h-9zM48.5,82h3v9h-3zM9,48.5h9v3H9z" />
+    <group
+        android:pivotX="50"
+        android:pivotY="50"
+        android:rotation="30">
+        <path
+            android:fillColor="#FFA1A1AA"
+            android:pathData="M49.25,10h1.5v5h-1.5z" />
+    </group>
+    <group
+        android:pivotX="50"
+        android:pivotY="50"
+        android:rotation="60">
+        <path
+            android:fillColor="#FFA1A1AA"
+            android:pathData="M49.25,10h1.5v5h-1.5z" />
+    </group>
+    <group
+        android:pivotX="50"
+        android:pivotY="50"
+        android:rotation="120">
+        <path
+            android:fillColor="#FFA1A1AA"
+            android:pathData="M49.25,10h1.5v5h-1.5z" />
+    </group>
+    <group
+        android:pivotX="50"
+        android:pivotY="50"
+        android:rotation="150">
+        <path
+            android:fillColor="#FFA1A1AA"
+            android:pathData="M49.25,10h1.5v5h-1.5z" />
+    </group>
+    <group
+        android:pivotX="50"
+        android:pivotY="50"
+        android:rotation="210">
+        <path
+            android:fillColor="#FFA1A1AA"
+            android:pathData="M49.25,10h1.5v5h-1.5z" />
+    </group>
+    <group
+        android:pivotX="50"
+        android:pivotY="50"
+        android:rotation="240">
+        <path
+            android:fillColor="#FFA1A1AA"
+            android:pathData="M49.25,10h1.5v5h-1.5z" />
+    </group>
+    <group
+        android:pivotX="50"
+        android:pivotY="50"
+        android:rotation="300">
+        <path
+            android:fillColor="#FFA1A1AA"
+            android:pathData="M49.25,10h1.5v5h-1.5z" />
+    </group>
+    <group
+        android:pivotX="50"
+        android:pivotY="50"
+        android:rotation="330">
+        <path
+            android:fillColor="#FFA1A1AA"
+            android:pathData="M49.25,10h1.5v5h-1.5z" />
+    </group>
+</vector>
