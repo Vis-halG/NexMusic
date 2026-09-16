@@ -13,6 +13,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 import 'music_data.dart';
 import 'phone_services.dart';
@@ -280,6 +281,40 @@ Future<void> _deleteQuietly(File? file) async {
   try {
     await file.delete();
   } catch (_) {}
+}
+
+/// Folder where links shared to nexMusic are saved for another tool.
+const simpleInputFolder = 'simpleinput';
+
+/// Folder where another tool leaves audio files; each one opens the upload
+/// screen.
+const simpleOutputFolder = 'simpleoutput';
+
+/// Saves the exact text or link shared as a new text file in [folder].
+Future<File> saveLinkIn(Directory folder, String shared) async {
+  final text = shared.trim();
+  await folder.create(recursive: true);
+  final file = File(
+    path.join(folder.path, 'link_${DateTime.now().microsecondsSinceEpoch}.txt'),
+  );
+  return file.writeAsString('$text\n');
+}
+
+/// Audio files in [folder] whose size has not changed since the last look,
+/// so whatever writes them has finished. [sizes] keeps the sizes seen.
+List<File> finishedAudioFiles(Directory folder, Map<String, int> sizes) {
+  if (!folder.existsSync()) return const [];
+  final finished = <File>[];
+  final present = <String>{};
+  for (final file in folder.listSync().whereType<File>()) {
+    if (uploadKindFor(file.path) != 'audio') continue;
+    final size = file.lengthSync();
+    present.add(file.path);
+    if (size > 0 && sizes[file.path] == size) finished.add(file);
+    sizes[file.path] = size;
+  }
+  sizes.removeWhere((filePath, _) => !present.contains(filePath));
+  return finished;
 }
 
 /// Playback, preferences and Firebase access stay in one controller so the
@@ -1618,6 +1653,293 @@ class MusicController extends ChangeNotifier {
     }
   }
 
+  // ── simpleinput and simpleoutput ─────────────────────────────────────────
+
+  final YoutubeExplode _yt = YoutubeExplode();
+  final Map<String, int> _outputSizes = {};
+  final _outputFiles = StreamController<String>.broadcast();
+  Timer? _outputTimer;
+  bool _watchingOutput = false;
+  bool _processingInput = false;
+
+  /// Audio files taken from simpleoutput, ready for the upload screen.
+  Stream<String> get simpleOutputFiles => _outputFiles.stream;
+
+  /// nexMusic's private folder called [name], inside the app's own files
+  /// (/data/data/com.thenex.nex_music/files on Android). Only the app itself
+  /// can read and write it.
+  Future<Directory> _handoffFolder(String name) async {
+    final base = await getApplicationSupportDirectory();
+    return Directory(path.join(base.path, name)).create(recursive: true);
+  }
+
+  /// Sanitizes file names for safe saving on device file systems.
+  String _sanitize(String name) {
+    return name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').trim();
+  }
+
+  /// Extracts valid YouTube URLs from text.
+  List<String> _extractYoutubeUrls(String text) {
+    final regex = RegExp(
+      r'(https?://(?:[a-zA-Z0-9-]+\.)?(?:youtube\.com|youtu\.be)/[^\s]+)',
+      caseSensitive: false,
+    );
+    final matches = regex.allMatches(text).map((m) => m.group(0)!).toList();
+    return matches
+        .map((u) => u.replaceAll(RegExp(r'[.,;:!?)"\x27\>]+$'), ''))
+        .toSet()
+        .toList();
+  }
+
+  /// Extracts direct audio stream URLs (e.g. .mp3, .m4a, .aac, .wav) from text.
+  List<String> _extractAudioStreamUrls(String text) {
+    final regex = RegExp(
+      r'(https?://[^\s]+\.(?:mp3|m4a|aac|wav|ogg|flac)(?:\?[^\s]*)?)',
+      caseSensitive: false,
+    );
+    final matches = regex.allMatches(text).map((m) => m.group(0)!).toList();
+    return matches
+        .map((u) => u.replaceAll(RegExp(r'[.,;:!?)"\x27\>]+$'), ''))
+        .toSet()
+        .toList();
+  }
+
+  /// Downloads a direct audio URL and saves it to [simpleOutputFolder].
+  Future<File?> downloadDirectAudio(String url) async {
+    HttpClient? client;
+    try {
+      final outputDir = await _handoffFolder(simpleOutputFolder);
+      final uri = Uri.tryParse(url);
+      if (uri == null) return null;
+      final rawName = path.basename(uri.path);
+      final safeName = _sanitize(
+        rawName.isEmpty ? 'audio_${DateTime.now().millisecondsSinceEpoch}.mp3' : rawName,
+      );
+      notice = 'Downloading "$safeName"...';
+      notifyListeners();
+
+      client = HttpClient();
+      final request = await client.getUrl(uri);
+      final response = await request.close();
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        final inputDir = await _handoffFolder(simpleInputFolder);
+        final tempFile = File(path.join(inputDir.path, '$safeName.tmp'));
+        final sink = tempFile.openWrite();
+        await response.pipe(sink);
+
+        var targetPath = path.join(outputDir.path, safeName);
+        var counter = 1;
+        while (File(targetPath).existsSync() ||
+            File(path.join(outputDir.path, 'opened', path.basename(targetPath))).existsSync()) {
+          final base = path.basenameWithoutExtension(safeName);
+          final ext = path.extension(safeName);
+          targetPath = path.join(outputDir.path, '$base ($counter)$ext');
+          counter++;
+        }
+        final outputFile = await tempFile.rename(targetPath);
+        notice = 'Downloaded "$safeName"';
+        notifyListeners();
+
+        await _dispatchOutputFile(outputFile, outputDir);
+        return outputFile;
+      }
+    } catch (e) {
+      debugPrint('Direct audio download error: $e');
+    } finally {
+      client?.close();
+    }
+    return null;
+  }
+
+  /// Safely moves a finished audio file to simpleoutput/opened and notifies
+  /// listeners via [simpleOutputFiles] so the upload screen opens.
+  Future<void> _dispatchOutputFile(File file, Directory outputDir) async {
+    try {
+      if (!file.existsSync()) return;
+      final opened = await Directory(
+        path.join(outputDir.path, 'opened'),
+      ).create();
+      var destPath = path.join(opened.path, path.basename(file.path));
+      var counter = 1;
+      while (File(destPath).existsSync()) {
+        final name = path.basenameWithoutExtension(file.path);
+        final ext = path.extension(file.path);
+        destPath = path.join(opened.path, '$name ($counter)$ext');
+        counter++;
+      }
+      final moved = await file.rename(destPath);
+      _outputSizes.remove(file.path);
+      if (!_outputFiles.isClosed) _outputFiles.add(moved.path);
+    } catch (e) {
+      debugPrint('Could not dispatch ${file.path}: $e');
+    }
+  }
+
+  /// Downloads best audio stream directly from YouTube, converts to MP3, and
+  /// saves it into [simpleOutputFolder], ready for the upload screen.
+  Future<File?> convertUrlToAudio(String url) async {
+    File? tempFile;
+    try {
+      final inputDir = await _handoffFolder(simpleInputFolder);
+      final outputDir = await _handoffFolder(simpleOutputFolder);
+
+      // 1. Video info
+      final video = await _yt.videos.get(url);
+      final safeTitle = _sanitize(video.title);
+      notice = 'Converting "$safeTitle" to MP3...';
+      notifyListeners();
+
+      // 2. Best audio stream
+      final manifest = await _yt.videos.streamsClient.getManifest(video.id);
+      final aacStreams = manifest.audioOnly.where(
+        (s) => s.container.name == 'm4a' || s.container.name == 'mp4',
+      );
+      final audio = aacStreams.isNotEmpty
+          ? aacStreams.withHighestBitrate()
+          : manifest.audioOnly.withHighestBitrate();
+
+      // 3. Save as mp3 in output folder
+      const ext = 'mp3';
+      tempFile = File(path.join(inputDir.path, '$safeTitle.tmp'));
+      final sink = tempFile.openWrite();
+      await _yt.videos.streamsClient.get(audio).pipe(sink);
+
+      // 4. Move to output folder
+      var targetPath = path.join(outputDir.path, '$safeTitle.$ext');
+      var counter = 1;
+      while (File(targetPath).existsSync() ||
+          File(path.join(outputDir.path, 'opened', path.basename(targetPath))).existsSync()) {
+        targetPath = path.join(outputDir.path, '$safeTitle ($counter).$ext');
+        counter++;
+      }
+      final outputFile = await tempFile.rename(targetPath);
+      notice = 'Downloaded "$safeTitle"';
+      notifyListeners();
+
+      // Immediately dispatch to opened folder and announce on simpleOutputFiles
+      await _dispatchOutputFile(outputFile, outputDir);
+
+      return outputFile;
+    } catch (e) {
+      if (tempFile != null && tempFile.existsSync()) {
+        try {
+          tempFile.deleteSync();
+        } catch (_) {}
+      }
+      debugPrint('YouTube download error: $e');
+      notice = 'Download error: $e';
+      notifyListeners();
+      return null;
+    }
+  }
+
+  /// Alias for convertUrlToAudio.
+  Future<File?> convertUrlToMp3(String url) => convertUrlToAudio(url);
+
+  /// Processes text files placed in [simpleInputFolder]. Extracts YouTube URLs,
+  /// downloads the audio to [simpleOutputFolder], and deletes the input file.
+  Future<void> processInputFolder() async {
+    if (kIsWeb || _processingInput) return;
+    _processingInput = true;
+    try {
+      final inputDir = await _handoffFolder(simpleInputFolder);
+      for (final tmp in inputDir
+          .listSync()
+          .whereType<File>()
+          .where((f) => f.path.endsWith('.tmp'))) {
+        try {
+          tmp.deleteSync();
+        } catch (_) {}
+      }
+      final files = inputDir
+          .listSync()
+          .whereType<File>()
+          .where((f) =>
+              !path.basename(f.path).startsWith('.') &&
+              f.path.endsWith('.txt'))
+          .toList();
+
+      for (final file in files) {
+        final content = await file.readAsString();
+        var urls = _extractYoutubeUrls(content);
+        final directUrls = _extractAudioStreamUrls(content);
+
+        if (urls.isEmpty && directUrls.isEmpty) {
+          final fallbackYt = youtubeLinkIn(content);
+          if (fallbackYt != null) {
+            urls = [fallbackYt];
+          }
+        }
+
+        if (urls.isEmpty && directUrls.isEmpty) {
+          await file.delete();
+          continue;
+        }
+
+        for (final url in urls) {
+          debugPrint('Converting: $url');
+          await convertUrlToAudio(url);
+        }
+
+        for (final url in directUrls) {
+          debugPrint('Downloading direct audio: $url');
+          await downloadDirectAudio(url);
+        }
+
+        if (await file.exists()) {
+          await file.delete();
+        }
+      }
+    } catch (error) {
+      debugPrint('processInputFolder error: $error');
+    } finally {
+      _processingInput = false;
+    }
+  }
+
+  /// Saves a link or text shared from another app in simpleinput.
+  Future<void> saveToSimpleInput(String shared) async {
+    try {
+      final file = await saveLinkIn(
+        await _handoffFolder(simpleInputFolder),
+        shared,
+      );
+      notice = 'Saved to $simpleInputFolder as ${path.basename(file.path)}.';
+      unawaited(processInputFolder());
+    } catch (error) {
+      notice = 'The link could not be saved: $error';
+    }
+    notifyListeners();
+  }
+
+  /// Creates simpleinput and simpleoutput, then looks in simpleoutput periodically.
+  /// Each finished audio file moves to simpleoutput/opened, so it
+  /// opens the upload screen only once, and is announced on
+  /// [simpleOutputFiles].
+  Future<void> watchSimpleOutput() async {
+    if (kIsWeb || _watchingOutput) return;
+    _watchingOutput = true;
+    final Directory folder;
+    try {
+      await _handoffFolder(simpleInputFolder);
+      folder = await _handoffFolder(simpleOutputFolder);
+    } catch (error) {
+      debugPrint('simpleoutput is unavailable: $error');
+      return;
+    }
+    unawaited(processInputFolder());
+    // Initial check for any already finished audio files
+    for (final file in finishedAudioFiles(folder, _outputSizes)) {
+      await _dispatchOutputFile(file, folder);
+    }
+    _outputTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      unawaited(processInputFolder());
+      for (final file in finishedAudioFiles(folder, _outputSizes)) {
+        await _dispatchOutputFile(file, folder);
+      }
+    });
+  }
+
   // ── Offline songs ────────────────────────────────────────────────────────
 
   /// Saves a public song inside the app so it plays without internet.
@@ -2387,6 +2709,9 @@ class MusicController extends ChangeNotifier {
     }
     _catalogSaveTimer?.cancel();
     _widgetTimer?.cancel();
+    _outputTimer?.cancel();
+    _outputFiles.close();
+    _yt.close();
     _audio.dispose();
     positionListenable.dispose();
     super.dispose();

@@ -81,9 +81,13 @@ file stays on Cloudinary until it is removed from the Media Library.
 - Any song or video can be downloaded from its ⋮ menu and then plays from the
   phone without internet (Profile → Downloads). A download is removed when
   its uploader deletes the song.
-- Sharing a YouTube link to nexMusic copies the link and opens the in-app
-  browser on a "youtube to mp3" search; other shared links open the "Save
-  link" screen. nexMusic never contacts YouTube itself.
+- Sharing to nexMusic: audio or video files open the upload screen. A shared
+  link, or text without one, is saved as a new `.txt` file in the app's
+  `simpleinput` folder. When a YouTube link is detected, nexMusic downloads its
+  highest-quality audio stream directly into `simpleoutput`. Whenever an audio file
+  appears in `simpleoutput` and stops growing, it moves to `simpleoutput/opened`
+  and the upload screen opens with it. Both folders reside in the app's private
+  storage (`/data/data/com.thenex.nex_music/files/` on Android).
 - A song or video downloaded inside the in-app browser is saved to the app
   cache and opens the upload screen with the file ready; a category still has
   to be chosen. Direct file links are captured; downloads a page builds in
