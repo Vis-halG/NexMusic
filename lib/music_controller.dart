@@ -15,6 +15,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'music_data.dart';
+import 'music_provider.dart';
 import 'phone_services.dart';
 
 /// File types accepted for public uploads: the audio and video formats
@@ -32,7 +33,17 @@ const videoExtensions = [
 /// Formats phones cannot play reliably, and what Cloudinary streams instead.
 const _streamAsMp3 = {'aiff', 'aif'};
 const _streamAsMp4 = {
-  '3g2', 'avi', 'flv', 'wmv', 'mpg', 'mpeg', 'ts', 'mts', 'm2ts', 'ogv', 'mxf', //
+  '3g2',
+  'avi',
+  'flv',
+  'wmv',
+  'mpg',
+  'mpeg',
+  'ts',
+  'mts',
+  'm2ts',
+  'ogv',
+  'mxf', //
 };
 
 /// The link saved for an uploaded file. Cloudinary converts a file when its
@@ -68,7 +79,10 @@ const cloudinaryUploadPreset = String.fromEnvironment(
 
 /// Returns 'audio' or 'video' for a supported upload, or null otherwise.
 String? uploadKindFor(String fileName) {
-  final extension = path.extension(fileName).toLowerCase().replaceFirst('.', '');
+  final extension = path
+      .extension(fileName)
+      .toLowerCase()
+      .replaceFirst('.', '');
   if (videoExtensions.contains(extension)) return 'video';
   if (audioExtensions.contains(extension)) return 'audio';
   return null;
@@ -112,9 +126,7 @@ void discardTemporaryCopy(String filePath) {
       !normalized.contains('/cache/nexmusic_uploads/')) {
     return;
   }
-  unawaited(
-    File(filePath).delete().then<void>((_) {}, onError: (Object _) {}),
-  );
+  unawaited(File(filePath).delete().then<void>((_) {}, onError: (Object _) {}));
 }
 
 /// Names a browser download from its Content-Disposition header, falling back
@@ -293,6 +305,8 @@ class MusicController extends ChangeNotifier {
     AudioPlayer? player,
     NexAudioHandler? audioHandler,
     PhoneServices? phone,
+    MusicProvider? musicProvider,
+    List<MusicProvider>? musicProviders,
   }) : this._withFirebase(
          preferences,
          auth,
@@ -301,6 +315,12 @@ class MusicController extends ChangeNotifier {
          player ?? AudioPlayer(),
          audioHandler,
          phone,
+         musicProviders ??
+             [
+               musicProvider ?? JioSaavnProvider(),
+               if (musicProvider == null) YouTubeMusicProvider(),
+               if (musicProvider == null) YouTubeVideoProvider(),
+             ],
        );
 
   MusicController._withFirebase(
@@ -311,7 +331,12 @@ class MusicController extends ChangeNotifier {
     this._audio,
     this._audioHandler,
     this.phone,
+    this._musicProviders,
   ) {
+    if (_musicProviders.isEmpty) {
+      throw ArgumentError.value(_musicProviders, 'musicProviders');
+    }
+    activeProviderId = _musicProviders.first.id;
     signedIn = _auth?.currentUser != null;
     pushEnabled = _prefs.getBool('pushEnabled') ?? true;
     // Lock screen and notification buttons follow the app's own queue.
@@ -398,6 +423,7 @@ class MusicController extends ChangeNotifier {
   final FirebaseStorage? _storage;
   final AudioPlayer _audio;
   final NexAudioHandler? _audioHandler;
+  final List<MusicProvider> _musicProviders;
 
   /// Widgets, notifications and push on Android; null in tests.
   final PhoneServices? phone;
@@ -421,6 +447,15 @@ class MusicController extends ChangeNotifier {
   /// changed since the last sync are read from Firestore.
   List<MusicCategory> categories = const [];
   List<Song> songs = const [];
+
+  /// Results from the optional online provider. They stay separate from the
+  /// shared Firebase catalogue and are never uploaded to Firestore.
+  List<Song> providerSongs = const [];
+  bool providerLoading = false;
+  String? providerError;
+  String providerQuery = '';
+  String activeProviderId = '';
+  int _providerRequest = 0;
   int _catalogSyncedAt = 0;
   bool _catalogStarting = false;
   Timer? _catalogSaveTimer;
@@ -428,6 +463,17 @@ class MusicController extends ChangeNotifier {
   /// Current or most recent batch of public uploads.
   List<UploadItem> uploads = const [];
   bool _drainingUploads = false;
+
+  /// True while the listener has paused the batch. Nothing new starts, and a
+  /// file that was halfway starts again from the beginning on resume, because
+  /// Cloudinary takes each file in a single request.
+  bool uploadsPaused = false;
+
+  /// The request sending each file, so a pause or cancel can pull it back.
+  final Map<UploadItem, HttpClient> _uploadClients = {};
+
+  /// What a file in flight becomes once its request has been pulled back.
+  final Map<UploadItem, UploadStatus> _stopTo = {};
 
   List<Song> queue = const [];
   List<MediaFolder> mediaFolders = const [
@@ -463,13 +509,12 @@ class MusicController extends ChangeNotifier {
   int get uploadsFinished => uploads.where((item) => item.finished).length;
   int get uploadsFailed =>
       uploads.where((item) => item.status == UploadStatus.failed).length;
+  int get uploadsCancelled =>
+      uploads.where((item) => item.status == UploadStatus.cancelled).length;
 
   /// Share of the batch's bytes that are finished or in flight.
   double get uploadFraction {
-    final total = uploads.fold<int>(
-      0,
-      (bytes, item) => bytes + item.sizeBytes,
-    );
+    final total = uploads.fold<int>(0, (bytes, item) => bytes + item.sizeBytes);
     if (total == 0) return 0;
     final sent = uploads.fold<double>(
       0,
@@ -525,6 +570,90 @@ class MusicController extends ChangeNotifier {
 
   String categoryName(String id) => categoryById(id)?.name ?? 'Uncategorized';
 
+  List<({String id, String name})> get musicProviders => [
+    for (final provider in _musicProviders)
+      (id: provider.id, name: provider.displayName),
+  ];
+
+  MusicProvider? _providerById(String id) {
+    for (final provider in _musicProviders) {
+      if (provider.id == id) return provider;
+    }
+    return null;
+  }
+
+  bool hasProvider(String id) => _providerById(id) != null;
+
+  String providerNameFor(String id) =>
+      _providerById(id)?.displayName ?? 'Online music';
+
+  String get providerName => providerNameFor(activeProviderId);
+
+  String songSource(Song song) {
+    if (!song.isProvider) return categoryName(song.categoryId);
+    return [
+      song.artist,
+      providerNameFor(song.providerId),
+    ].where((part) => part.isNotEmpty).join(' · ');
+  }
+
+  void selectProvider(String providerId) {
+    if (activeProviderId == providerId || !hasProvider(providerId)) return;
+    _providerRequest++;
+    activeProviderId = providerId;
+    providerQuery = '';
+    providerSongs = const [];
+    providerError = null;
+    providerLoading = false;
+    notifyListeners();
+  }
+
+  Future<void> searchProvider(String query, {String? providerId}) async {
+    final targetId = providerId ?? activeProviderId;
+    final provider = _providerById(targetId);
+    if (provider == null) return;
+    if (activeProviderId != targetId) {
+      activeProviderId = targetId;
+      providerSongs = const [];
+    }
+    final value = query.trim();
+    final request = ++_providerRequest;
+    providerQuery = value;
+    providerError = null;
+    if (value.isEmpty) {
+      providerSongs = const [];
+      providerLoading = false;
+      notifyListeners();
+      return;
+    }
+    providerLoading = true;
+    notifyListeners();
+    try {
+      final results = await provider.searchSongs(value);
+      if (request != _providerRequest) return;
+      providerSongs = results;
+    } catch (_) {
+      if (request != _providerRequest) return;
+      providerSongs = const [];
+      providerError =
+          'Could not search ${provider.displayName}. Check your connection.';
+    } finally {
+      if (request == _providerRequest) {
+        providerLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  void clearProviderSearch() {
+    _providerRequest++;
+    providerQuery = '';
+    providerSongs = const [];
+    providerError = null;
+    providerLoading = false;
+    notifyListeners();
+  }
+
   List<Song> songsIn(String? categoryId) => categoryId == null
       ? songs
       : songs.where((song) => song.categoryId == categoryId).toList();
@@ -547,6 +676,16 @@ class MusicController extends ChangeNotifier {
     return song.url;
   }
 
+  Future<String> resolvedPlayableUrl(Song song) async {
+    final local = playableUrl(song);
+    if (!song.isProvider || local.isNotEmpty) return local;
+    final provider = _providerById(song.providerId);
+    if (provider == null) {
+      throw FormatException('Unknown music provider: ${song.providerId}');
+    }
+    return provider.resolveStreamUrl(song);
+  }
+
   @override
   void notifyListeners() {
     super.notifyListeners();
@@ -559,15 +698,18 @@ class MusicController extends ChangeNotifier {
   static const _uploadNotificationId = 1001;
 
   MediaItem _mediaItem(Song song, {Duration? duration}) {
-    final category = song.isPrivate
-        ? 'Private library'
-        : categoryName(song.categoryId);
+    final category = song.isPrivate ? 'Private library' : songSource(song);
     return MediaItem(
       id: song.id,
       title: song.title,
-      artist: category,
+      artist: song.artist.isEmpty ? category : song.artist,
       album: category,
-      duration: duration,
+      duration:
+          duration ??
+          (song.durationMs > 0
+              ? Duration(milliseconds: song.durationMs)
+              : null),
+      artUri: song.artworkUrl.isEmpty ? null : Uri.tryParse(song.artworkUrl),
     );
   }
 
@@ -626,12 +768,25 @@ class MusicController extends ChangeNotifier {
   void _finishUploads() {
     if (uploads.isEmpty) return;
     final category = categoryName(uploads.first.categoryId);
+    if (uploadsPaused && uploading) {
+      unawaited(
+        phone?.showDone(
+          _uploadNotificationId,
+          title: 'Uploads paused',
+          text: '$uploadsFinished of ${uploads.length} done · $category',
+        ),
+      );
+      return;
+    }
     final done = [
       for (final item in uploads)
         if (item.status == UploadStatus.done) item,
     ];
     final failed = uploadsFailed;
+    final cancelled = uploadsCancelled;
     final title = switch ((done.length, failed)) {
+      _ when cancelled > 0 && done.isEmpty => 'Uploads cancelled',
+      _ when cancelled > 0 => '${done.length} uploaded, the rest cancelled',
       (0, 0) => 'Already in nexMusic',
       (1, 0) => 'Upload finished',
       (final ok, 0) => '$ok uploads finished',
@@ -717,7 +872,7 @@ class MusicController extends ChangeNotifier {
       return;
     }
     current = song;
-    if (!song.isPrivate) {
+    if (!song.isPrivate && !song.isProvider) {
       recentSongIds
         ..remove(song.id)
         ..insert(0, song.id);
@@ -737,7 +892,7 @@ class MusicController extends ChangeNotifier {
     _audioHandler?.mediaItem.add(_mediaItem(song));
     unawaited(phone?.setSessionActive(true));
     try {
-      await _audio.setUrl(playableUrl(song));
+      await _audio.setUrl(await resolvedPlayableUrl(song));
       // play() only completes when playback stops, so it is not awaited.
       unawaited(_audio.play());
     } on PlayerInterruptedException {
@@ -859,22 +1014,17 @@ class MusicController extends ChangeNotifier {
     final since = math.max(0, _catalogSyncedAt - 120000);
     _catalogSubs
       ..add(
-        firestore
-            .collection('categories')
-            .snapshots()
-            .listen((snapshot) {
-              categories =
-                  snapshot.docs.map((doc) {
-                    final row = doc.data();
-                    return MusicCategory(
-                      id: doc.id,
-                      name: row['name'] as String? ?? 'Untitled',
-                      ownerUid: row['ownerUid'] as String? ?? '',
-                    );
-                  }).toList()
-                    ..sort(_byName);
-              notifyListeners();
-            }, onError: _onCatalogError),
+        firestore.collection('categories').snapshots().listen((snapshot) {
+          categories = snapshot.docs.map((doc) {
+            final row = doc.data();
+            return MusicCategory(
+              id: doc.id,
+              name: row['name'] as String? ?? 'Untitled',
+              ownerUid: row['ownerUid'] as String? ?? '',
+            );
+          }).toList()..sort(_byName);
+          notifyListeners();
+        }, onError: _onCatalogError),
       )
       ..add(
         firestore
@@ -1132,9 +1282,10 @@ class MusicController extends ChangeNotifier {
       for (var i = 0; i < batches.length; i += 5) {
         await Future.wait([
           for (final batch in batches.skip(i).take(5))
-            _softDeleteSongs(firestore, batch).then(
-              (_) => removed.addAll(batch.map((song) => song.id)),
-            ),
+            _softDeleteSongs(
+              firestore,
+              batch,
+            ).then((_) => removed.addAll(batch.map((song) => song.id))),
         ]);
       }
       await firestore.collection('categories').doc(category.id).delete();
@@ -1242,6 +1393,7 @@ class MusicController extends ChangeNotifier {
         ..error = null;
     }
     _reportedUploads.clear();
+    uploadsPaused = false;
     uploads = List.of(items);
     notifyListeners();
     await _drainUploads();
@@ -1261,6 +1413,52 @@ class MusicController extends ChangeNotifier {
     await _drainUploads();
   }
 
+  /// Pauses the batch: nothing new starts, and files in flight are pulled back
+  /// to wait in the queue.
+  void pauseUploads() {
+    if (!uploading || uploadsPaused) return;
+    uploadsPaused = true;
+    _pullBack(UploadStatus.queued);
+    notifyListeners();
+  }
+
+  Future<void> resumeUploads() async {
+    if (!uploadsPaused) return;
+    uploadsPaused = false;
+    notifyListeners();
+    await _drainUploads();
+  }
+
+  /// Stops the batch for good. Songs already in nexMusic stay; the rest are
+  /// not sent.
+  void cancelUploads() {
+    if (!uploading) return;
+    uploadsPaused = false;
+    for (final item in uploads) {
+      if (item.status == UploadStatus.queued) {
+        item.status = UploadStatus.cancelled;
+        discardPicked(item);
+      }
+    }
+    _pullBack(UploadStatus.cancelled);
+    notifyListeners();
+    // A paused batch has no worker left to sum it up.
+    if (!_drainingUploads) _finishUploads();
+  }
+
+  /// Pulls back every file still on its way to Cloudinary. A file that has
+  /// already reached Cloudinary is left to finish, so no upload is stranded
+  /// without its catalogue entry.
+  void _pullBack(UploadStatus to) {
+    for (final item in uploads) {
+      if (item.status != UploadStatus.uploading || item.uploadedUrl != null) {
+        continue;
+      }
+      _stopTo[item] = to;
+      _uploadClients[item]?.close(force: true);
+    }
+  }
+
   /// Forgets a finished batch and removes the picker's copies from the cache.
   void clearUploads() {
     if (uploading) return;
@@ -1276,6 +1474,7 @@ class MusicController extends ChangeNotifier {
     _drainingUploads = true;
     Future<void> worker() async {
       while (true) {
+        if (uploadsPaused) return;
         UploadItem? next;
         for (final item in uploads) {
           if (item.status == UploadStatus.queued) {
@@ -1424,7 +1623,19 @@ class MusicController extends ChangeNotifier {
       item
         ..status = UploadStatus.failed
         ..error = 'Network or file error: $error';
+    } catch (error) {
+      // Pulling a request back can surface as any error; the stop below
+      // decides what the file becomes.
+      if (!_stopTo.containsKey(item)) rethrow;
     } finally {
+      final stop = _stopTo.remove(item);
+      if (stop != null && item.uploadedUrl == null) {
+        item
+          ..status = stop
+          ..progress = 0
+          ..error = null;
+        if (stop == UploadStatus.cancelled) discardPicked(item);
+      }
       notifyListeners();
     }
   }
@@ -1453,6 +1664,12 @@ class MusicController extends ChangeNotifier {
     final tail = utf8.encode('\r\n--$boundary--\r\n');
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 30);
+    // Paused or cancelled before the file started on its way.
+    if (_stopTo.containsKey(item)) {
+      client.close(force: true);
+      throw const _UploadFailure('Stopped.');
+    }
+    _uploadClients[item] = client;
     try {
       final request = await client.postUrl(
         Uri.https(
@@ -1498,7 +1715,9 @@ class MusicController extends ChangeNotifier {
       final url = json['secure_url'];
       final publicId = json['public_id'];
       if (url is! String || publicId is! String) {
-        throw const _UploadFailure('Cloudinary did not return a link for the file.');
+        throw const _UploadFailure(
+          'Cloudinary did not return a link for the file.',
+        );
       }
       final seconds = json['duration'];
       return (
@@ -1507,6 +1726,7 @@ class MusicController extends ChangeNotifier {
         durationMs: seconds is num ? (seconds * 1000).round() : 0,
       );
     } finally {
+      _uploadClients.remove(item);
       client.close(force: true);
     }
   }
@@ -1632,23 +1852,34 @@ class MusicController extends ChangeNotifier {
     notifyListeners();
     final notificationId = 2000 + (song.id.hashCode & 0x3FF);
     unawaited(
-      phone?.showProgress(notificationId, title: 'Downloading', text: song.title),
+      phone?.showProgress(
+        notificationId,
+        title: 'Downloading',
+        text: song.title,
+      ),
     );
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 30);
     File? file;
     try {
+      final sourceUrl = await resolvedPlayableUrl(song);
       final documents = await getApplicationDocumentsDirectory();
       final folder = Directory(path.join(documents.path, 'offline_songs'));
       await folder.create(recursive: true);
-      final extension = path.extension(Uri.parse(song.url).path).toLowerCase();
+      final extension = path.extension(Uri.parse(sourceUrl).path).toLowerCase();
+      final defaultExtension = switch (song.providerId) {
+        'ytmusic' => '.m4a',
+        'ytvideo' => '.mp4',
+        _ => '.mp3',
+      };
+      final safeId = song.id.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
       file = File(
         path.join(
           folder.path,
-          '${song.id}${extension.isEmpty ? '.mp3' : extension}',
+          '$safeId${extension.isEmpty ? defaultExtension : extension}',
         ),
       );
-      final request = await client.getUrl(Uri.parse(song.url));
+      final request = await client.getUrl(Uri.parse(sourceUrl));
       final response = await request.close().timeout(
         const Duration(minutes: 1),
       );
@@ -1886,8 +2117,7 @@ class MusicController extends ChangeNotifier {
       return false;
     }
     if (savedMedia.any((item) => item.folderId == folder.id)) {
-      notice =
-          'This folder is not empty. Move or delete its items first.';
+      notice = 'This folder is not empty. Move or delete its items first.';
       notifyListeners();
       return false;
     }
@@ -2246,6 +2476,13 @@ class MusicController extends ChangeNotifier {
   void clearNotice() {
     if (notice == null) return;
     notice = null;
+    notifyListeners();
+  }
+
+  /// Shows [message] like any other notice, for work that carries on after
+  /// the screen that started it has closed.
+  void announce(String message) {
+    notice = message;
     notifyListeners();
   }
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -27,6 +28,15 @@ bool get _webViewSupported =>
 
 /// Bumped when a home screen widget asks for the search bar.
 final _searchRequests = ValueNotifier<int>(0);
+const _providerCategoryPrefix = 'provider:';
+
+String _providerCategoryId(String providerId) =>
+    '$_providerCategoryPrefix$providerId';
+
+String? _providerIdFromCategory(String? categoryId) =>
+    categoryId != null && categoryId.startsWith(_providerCategoryPrefix)
+    ? categoryId.substring(_providerCategoryPrefix.length)
+    : null;
 
 Color _muted(BuildContext context) =>
     Theme.of(context).colorScheme.onSurfaceVariant;
@@ -62,16 +72,23 @@ void _push(BuildContext context, Widget screen) {
   Navigator.of(context).push<void>(MaterialPageRoute(builder: (_) => screen));
 }
 
-void _openSong(BuildContext context, Song song, {List<Song>? queue}) {
+Future<void> _openSong(
+  BuildContext context,
+  Song song, {
+  List<Song>? queue,
+}) async {
   final music = context.read<MusicController>();
   if (song.isVideo) {
-    _push(
-      context,
-      VideoScreen(song: song.copyWith(url: music.playableUrl(song))),
-    );
+    try {
+      final url = await music.resolvedPlayableUrl(song);
+      if (!context.mounted) return;
+      _push(context, VideoScreen(song: song.copyWith(url: url)));
+    } catch (_) {
+      music.announce('Could not load this video. Try another result.');
+    }
     return;
   }
-  music.play(song, from: queue);
+  await music.play(song, from: queue);
 }
 
 void _openPlayer(BuildContext context) {
@@ -361,14 +378,25 @@ class _ChoicePicker extends StatelessWidget {
 }
 
 class _Thumb extends StatelessWidget {
-  const _Thumb({required this.icon, this.active = false, this.size = 44});
+  const _Thumb({
+    required this.icon,
+    this.active = false,
+    this.size = 44,
+    this.imageUrl = '',
+  });
   final IconData icon;
   final bool active;
   final double size;
+  final String imageUrl;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final fallback = Icon(
+      icon,
+      size: size * 0.46,
+      color: active ? NexMusicApp.violet : scheme.onSurfaceVariant,
+    );
     return Container(
       width: size,
       height: size,
@@ -377,12 +405,18 @@ class _Thumb extends StatelessWidget {
             ? NexMusicApp.violet.withValues(alpha: 0.12)
             : scheme.surfaceContainer,
         borderRadius: BorderRadius.circular(size * 0.22),
+        border: active
+            ? Border.all(color: NexMusicApp.violet, width: 1.5)
+            : null,
       ),
-      child: Icon(
-        icon,
-        size: size * 0.46,
-        color: active ? NexMusicApp.violet : scheme.onSurfaceVariant,
-      ),
+      clipBehavior: Clip.antiAlias,
+      child: imageUrl.isEmpty
+          ? fallback
+          : Image.network(
+              imageUrl,
+              fit: BoxFit.cover,
+              errorBuilder: (_, _, _) => fallback,
+            ),
     );
   }
 }
@@ -695,9 +729,10 @@ class _MusicShellState extends State<MusicShell> {
     phone?.takeLaunchAction().then((action) {
       if (action != null) _runLaunchAction(action);
     });
-    _shareSubscription = ReceiveSharingIntent.instance
-        .getMediaStream()
-        .listen(_openSharedItems, onError: (Object _) {});
+    _shareSubscription = ReceiveSharingIntent.instance.getMediaStream().listen(
+      _openSharedItems,
+      onError: (Object _) {},
+    );
     ReceiveSharingIntent.instance.getInitialMedia().then((items) {
       _openSharedItems(items);
       ReceiveSharingIntent.instance.reset();
@@ -717,7 +752,7 @@ class _MusicShellState extends State<MusicShell> {
       if (media.isEmpty) {
         final youtube = youtubeLinkIn(items.first.path);
         if (youtube != null && _webViewSupported) {
-          unawaited(_openConverterSearch(youtube));
+          _push(context, UploadScreen(sharedLink: youtube));
         } else {
           _push(context, SharedImportScreen(source: items.first.path));
         }
@@ -804,19 +839,6 @@ class _MusicShellState extends State<MusicShell> {
     });
   }
 
-  /// Copies a shared YouTube link and opens the in-app browser on a
-  /// "youtube to mp3" search, so the link can be pasted on the site chosen.
-  Future<void> _openConverterSearch(String link) async {
-    await Clipboard.setData(ClipboardData(text: link));
-    if (!mounted) return;
-    _push(context, const NexBrowserScreen(sharedLink: 'youtube to mp3'));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('YouTube link copied. Paste it on the site you open.'),
-      ),
-    );
-  }
-
   @override
   void dispose() {
     _shareSubscription?.cancel();
@@ -864,6 +886,7 @@ class _CatalogViewState extends State<_CatalogView> {
   final _search = TextEditingController();
   String? _categoryId;
   bool _searching = false;
+  Timer? _providerDebounce;
 
   @override
   void initState() {
@@ -878,6 +901,7 @@ class _CatalogViewState extends State<_CatalogView> {
   @override
   void dispose() {
     _searchRequests.removeListener(_openSearch);
+    _providerDebounce?.cancel();
     _search.dispose();
     super.dispose();
   }
@@ -892,24 +916,34 @@ class _CatalogViewState extends State<_CatalogView> {
   Widget build(BuildContext context) {
     final music = context.watch<MusicController>();
     // A category deleted elsewhere falls back to "All".
+    final selectedProviderId = _providerIdFromCategory(_categoryId);
     final selected =
-        _categoryId != null && music.categoryById(_categoryId!) != null
+        selectedProviderId != null && music.hasProvider(selectedProviderId)
+        ? _categoryId
+        : _categoryId != null && music.categoryById(_categoryId!) != null
         ? _categoryId
         : null;
     final query = _search.text.trim().toLowerCase();
-    final visible = music
-        .songsIn(selected)
-        .where(
-          (song) =>
-              query.isEmpty ||
-              song.title.toLowerCase().contains(query) ||
-              music.categoryName(song.categoryId).toLowerCase().contains(query),
-        )
-        .toList();
+    final providerId = _providerIdFromCategory(selected);
+    final providerSelected = providerId != null;
+    final visible = providerSelected
+        ? music.providerSongs
+        : music
+              .songsIn(selected)
+              .where(
+                (song) =>
+                    query.isEmpty ||
+                    song.title.toLowerCase().contains(query) ||
+                    music
+                        .categoryName(song.categoryId)
+                        .toLowerCase()
+                        .contains(query),
+              )
+              .toList();
 
     return Column(
       children: [
-        _searching ? _searchBar() : _header(music),
+        _searching ? _searchBar(music, providerId: providerId) : _header(music),
         SizedBox(
           height: 52,
           child: ListView(
@@ -928,6 +962,27 @@ class _CatalogViewState extends State<_CatalogView> {
                   onTap: () => setState(() => _categoryId = category.id),
                   onLongPress: () => _categoryActions(context, category),
                 ),
+              for (final provider in music.musicProviders)
+                _Pill(
+                  icon: switch (provider.id) {
+                    'ytmusic' => Icons.play_circle_outline_rounded,
+                    'ytvideo' => Icons.video_library_outlined,
+                    _ => Icons.public_rounded,
+                  },
+                  label: provider.name,
+                  selected: providerId == provider.id,
+                  onTap: () {
+                    music.selectProvider(provider.id);
+                    setState(() {
+                      _categoryId = _providerCategoryId(provider.id);
+                      _searching = true;
+                    });
+                    final value = _search.text.trim();
+                    if (value.isNotEmpty) {
+                      music.searchProvider(value, providerId: provider.id);
+                    }
+                  },
+                ),
               _Pill(
                 icon: Icons.add_rounded,
                 label: 'Category',
@@ -942,6 +997,49 @@ class _CatalogViewState extends State<_CatalogView> {
             ],
           ),
         ),
+        // A shared song sent to upload shows what its hidden browser is doing,
+        // in the place the upload progress takes once the audio arrives.
+        ValueListenableBuilder<List<SharedAudioJob>>(
+          valueListenable: SharedAudioJob.running,
+          builder: (context, jobs, _) {
+            final waiting = [
+              for (final job in jobs)
+                if (job.uploadRequested) job,
+            ];
+            if (waiting.isEmpty) return const SizedBox.shrink();
+            return ListenableBuilder(
+              listenable: Listenable.merge(waiting),
+              builder: (context, _) {
+                final job = waiting.first;
+                final title = job.requestTitle ?? '';
+                final others = waiting.length - 1;
+                return Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 2, 20, 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        [
+                          job.status,
+                          if (title.isNotEmpty) title,
+                          if (others > 0) '$others more waiting',
+                        ].join(' · '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: _muted(context), fontSize: 12),
+                      ),
+                      const SizedBox(height: 6),
+                      LinearProgressIndicator(
+                        value: job.fraction,
+                        minHeight: 3,
+                      ),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+        ),
         if (music.uploads.isNotEmpty)
           InkWell(
             onTap: () => _push(context, const UploadScreen()),
@@ -952,7 +1050,9 @@ class _CatalogViewState extends State<_CatalogView> {
                 children: [
                   Text(
                     music.uploading
-                        ? 'Uploading ${music.uploadsFinished} of ${music.uploads.length}'
+                        ? music.uploadsPaused
+                              ? 'Uploads paused · tap to resume'
+                              : 'Uploading ${music.uploadsFinished} of ${music.uploads.length}'
                         : 'Uploads finished · tap to review',
                     style: TextStyle(color: _muted(context), fontSize: 12),
                   ),
@@ -965,7 +1065,14 @@ class _CatalogViewState extends State<_CatalogView> {
               ),
             ),
           ),
-        Expanded(child: _list(music, visible, query)),
+        Expanded(
+          child: _list(
+            music,
+            visible,
+            query,
+            providerSelected: providerSelected,
+          ),
+        ),
       ],
     );
   }
@@ -998,37 +1105,71 @@ class _CatalogViewState extends State<_CatalogView> {
     ),
   );
 
-  Widget _searchBar() => Padding(
-    padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
-    child: Row(
-      children: [
-        Expanded(
-          child: TextField(
-            controller: _search,
-            autofocus: true,
-            textInputAction: TextInputAction.search,
-            onChanged: (_) => setState(() {}),
-            decoration: const InputDecoration(
-              hintText: 'Search songs or categories',
-              prefixIcon: Icon(Icons.search_rounded),
-              isDense: true,
+  Widget _searchBar(MusicController music, {required String? providerId}) =>
+      Padding(
+        padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _search,
+                autofocus: true,
+                textInputAction: TextInputAction.search,
+                onChanged: (value) {
+                  setState(() {});
+                  if (providerId == null) return;
+                  _providerDebounce?.cancel();
+                  _providerDebounce = Timer(
+                    const Duration(milliseconds: 450),
+                    () => music.searchProvider(value, providerId: providerId),
+                  );
+                },
+                onSubmitted: providerId != null
+                    ? (value) {
+                        _providerDebounce?.cancel();
+                        music.searchProvider(value, providerId: providerId);
+                      }
+                    : null,
+                decoration: InputDecoration(
+                  hintText: providerId != null
+                      ? 'Search ${music.providerNameFor(providerId)}'
+                      : 'Search songs or categories',
+                  prefixIcon: const Icon(Icons.search_rounded),
+                  isDense: true,
+                ),
+              ),
             ),
-          ),
+            IconButton(
+              tooltip: 'Close search',
+              onPressed: () {
+                _providerDebounce?.cancel();
+                setState(() {
+                  _searching = false;
+                  _search.clear();
+                });
+                if (providerId != null) music.clearProviderSearch();
+              },
+              icon: const Icon(Icons.close_rounded),
+            ),
+          ],
         ),
-        IconButton(
-          tooltip: 'Close search',
-          onPressed: () => setState(() {
-            _searching = false;
-            _search.clear();
-          }),
-          icon: const Icon(Icons.close_rounded),
-        ),
-      ],
-    ),
-  );
+      );
 
-  Widget _list(MusicController music, List<Song> visible, String query) {
-    if (!music.catalogLoaded) {
+  Widget _list(
+    MusicController music,
+    List<Song> visible,
+    String query, {
+    required bool providerSelected,
+  }) {
+    if (providerSelected && music.providerLoading && visible.isEmpty) {
+      return const Center(
+        child: SizedBox.square(
+          dimension: 22,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    if (!providerSelected && !music.catalogLoaded) {
       return const Center(
         child: SizedBox.square(
           dimension: 22,
@@ -1037,17 +1178,35 @@ class _CatalogViewState extends State<_CatalogView> {
       );
     }
     return RefreshIndicator(
-      onRefresh: music.refreshCatalog,
+      onRefresh: providerSelected
+          ? () => music.searchProvider(
+              _search.text,
+              providerId: _providerIdFromCategory(_categoryId),
+            )
+          : music.refreshCatalog,
       child: visible.isEmpty
           ? ListView(
               children: [
                 const SizedBox(height: 80),
                 _EmptyState(
-                  icon: query.isEmpty
+                  icon: providerSelected && music.providerError != null
+                      ? Icons.cloud_off_rounded
+                      : query.isEmpty
                       ? Icons.library_music_outlined
                       : Icons.search_off_rounded,
-                  title: query.isEmpty ? 'No songs here yet' : 'Nothing found',
-                  subtitle: query.isEmpty
+                  title: providerSelected
+                      ? music.providerError ??
+                            (query.isEmpty
+                                ? 'Search ${music.providerNameFor(_providerIdFromCategory(_categoryId)!)}'
+                                : 'Nothing found')
+                      : query.isEmpty
+                      ? 'No songs here yet'
+                      : 'Nothing found',
+                  subtitle: providerSelected
+                      ? query.isEmpty
+                            ? 'Type a song, album, or artist name.'
+                            : 'Pull down to try again.'
+                      : query.isEmpty
                       ? 'Tap + to upload the first one.'
                       : 'Try another word.',
                 ),
@@ -1076,7 +1235,7 @@ class SongTile extends StatelessWidget {
           ({
             bool active,
             bool playing,
-            String category,
+            String source,
             bool offline,
             double? download,
           })
@@ -1084,14 +1243,14 @@ class SongTile extends StatelessWidget {
           (music) => (
             active: music.current?.id == song.id,
             playing: music.playing,
-            category: music.categoryName(song.categoryId),
+            source: music.songSource(song),
             offline: music.isSongDownloaded(song),
             download: music.songDownloads[song.id],
           ),
         );
     final download = tile.download;
     final details = [
-      tile.category,
+      tile.source,
       if (song.isVideo) 'Video',
       if (download != null)
         'Downloading ${(download * 100).round()}%'
@@ -1102,6 +1261,7 @@ class SongTile extends StatelessWidget {
       contentPadding: const EdgeInsets.only(left: 20, right: 8),
       leading: _Thumb(
         active: tile.active,
+        imageUrl: song.artworkUrl,
         icon: tile.active && tile.playing
             ? Icons.graphic_eq_rounded
             : song.isVideo
@@ -1142,16 +1302,17 @@ Future<void> _songActions(BuildContext context, Song song) {
     context,
     title: song.title,
     (sheetContext) => [
-      ListTile(
-        leading: Icon(
-          liked ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+      if (!song.isProvider)
+        ListTile(
+          leading: Icon(
+            liked ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+          ),
+          title: Text(liked ? 'Remove from liked' : 'Like'),
+          onTap: () {
+            Navigator.pop(sheetContext);
+            music.toggleLike(song);
+          },
         ),
-        title: Text(liked ? 'Remove from liked' : 'Like'),
-        onTap: () {
-          Navigator.pop(sheetContext);
-          music.toggleLike(song);
-        },
-      ),
       if (!kIsWeb)
         ListTile(
           enabled: !downloading,
@@ -1177,30 +1338,32 @@ Future<void> _songActions(BuildContext context, Song song) {
             }
           },
         ),
-      // Anyone signed in can edit or delete any upload.
-      ListTile(
-        leading: const Icon(Icons.edit_outlined),
-        title: const Text('Edit or move'),
-        subtitle: const Text('Change the title or category'),
-        onTap: () {
-          Navigator.pop(sheetContext);
-          _push(context, SongEditorScreen(song: song));
-        },
-      ),
-      ListTile(
-        leading: const Icon(Icons.delete_outline_rounded),
-        title: const Text('Delete'),
-        onTap: () async {
-          Navigator.pop(sheetContext);
-          final confirmed = await _confirm(
-            context,
-            title: 'Delete "${song.title}"?',
-            body: 'It will be removed for everyone.',
-            action: 'Delete',
-          );
-          if (confirmed) await music.deleteSong(song);
-        },
-      ),
+      if (!song.isProvider) ...[
+        // Anyone signed in can edit or delete any upload.
+        ListTile(
+          leading: const Icon(Icons.edit_outlined),
+          title: const Text('Edit or move'),
+          subtitle: const Text('Change the title or category'),
+          onTap: () {
+            Navigator.pop(sheetContext);
+            _push(context, SongEditorScreen(song: song));
+          },
+        ),
+        ListTile(
+          leading: const Icon(Icons.delete_outline_rounded),
+          title: const Text('Delete'),
+          onTap: () async {
+            Navigator.pop(sheetContext);
+            final confirmed = await _confirm(
+              context,
+              title: 'Delete "${song.title}"?',
+              body: 'It will be removed for everyone.',
+              action: 'Delete',
+            );
+            if (confirmed) await music.deleteSong(song);
+          },
+        ),
+      ],
     ],
   );
 }
@@ -1372,8 +1535,17 @@ class _CategoryRow extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class UploadScreen extends StatefulWidget {
-  const UploadScreen({super.key, this.initialPaths = const []});
+  const UploadScreen({
+    super.key,
+    this.initialPaths = const [],
+    this.sharedLink,
+  });
   final List<String> initialPaths;
+
+  /// A YouTube link shared into nexMusic. The screen opens at once while a
+  /// browser out of sight turns the link into audio, so the title and category
+  /// can be filled in, and Upload pressed, before the audio arrives.
+  final String? sharedLink;
 
   @override
   State<UploadScreen> createState() => _UploadScreenState();
@@ -1385,7 +1557,7 @@ class _UploadScreenState extends State<UploadScreen> {
   final List<UploadItem> _picked = [];
   final List<String> _rejected = [];
   String? _categoryId;
-  bool _rights = false;
+  SharedAudioJob? _job;
 
   @override
   void initState() {
@@ -1400,10 +1572,18 @@ class _UploadScreenState extends State<UploadScreen> {
       );
     }
     if (_picked.length == 1) _title.text = _picked.first.title;
+    final link = widget.sharedLink;
+    if (link != null) _startJob(link);
   }
 
   @override
   void dispose() {
+    final job = _job;
+    if (job != null) {
+      job.removeListener(_onJob);
+      // Without an upload waiting on it, nothing needs the audio any more.
+      if (!job.uploadRequested) job.cancel();
+    }
     // Picked files that were never uploaded leave copies in the cache. Clear
     // them only when no upload batch still needs its files.
     if (_picked.isNotEmpty && _music.uploads.isEmpty) {
@@ -1416,6 +1596,57 @@ class _UploadScreenState extends State<UploadScreen> {
     }
     _title.dispose();
     super.dispose();
+  }
+
+  void _startJob(String link) {
+    _job?.removeListener(_onJob);
+    _job = SharedAudioJob.start(link, _music)..addListener(_onJob);
+  }
+
+  /// Follows the hidden browser. Audio that arrives before Upload is pressed
+  /// joins the selection like any picked file.
+  void _onJob() {
+    final job = _job;
+    if (!mounted || job == null) return;
+    setState(() {
+      final filePath = job.filePath;
+      if (filePath == null || job.uploadRequested) return;
+      if (_picked.any((item) => item.path == filePath)) return;
+      final file = File(filePath);
+      _add(
+        filePath,
+        _fileName(filePath),
+        file.existsSync() ? file.lengthSync() : 0,
+      );
+      if (_picked.length == 1 && _title.text.trim().isEmpty) {
+        _title.text = _picked.first.title;
+      }
+    });
+  }
+
+  void _retryJob() {
+    final link = widget.sharedLink;
+    if (link != null) setState(() => _startJob(link));
+  }
+
+  /// Hands the converter to the listener when the hidden browser could not
+  /// finish it.
+  void _openInBrowser() {
+    final link = widget.sharedLink;
+    if (link == null) return;
+    _push(
+      context,
+      NexBrowserScreen(sharedLink: 'youtube to mp3', pasteLink: link),
+    );
+  }
+
+  /// Keeps an upload that is waiting for its audio in step with the title and
+  /// category on screen.
+  void _syncRequest() {
+    final job = _job;
+    final categoryId = _categoryId;
+    if (job == null || !job.uploadRequested || categoryId == null) return;
+    job.requestUpload(title: _title.text.trim(), categoryId: categoryId);
   }
 
   /// Adds a picked file, or notes why it cannot be uploaded.
@@ -1524,7 +1755,23 @@ class _UploadScreenState extends State<UploadScreen> {
 
   void _upload() {
     final categoryId = _categoryId;
-    if (categoryId == null || _picked.isEmpty) return;
+    if (categoryId == null) return;
+    final job = _job;
+    if (_picked.isEmpty && job != null && job.waiting) {
+      // The audio is still on its way. The job uploads it once it arrives, so
+      // nobody has to wait here for the download.
+      job.requestUpload(title: _title.text.trim(), categoryId: categoryId);
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('The song uploads as soon as its audio is ready.'),
+          ),
+        );
+      unawaited(Navigator.maybePop(context));
+      return;
+    }
+    if (_picked.isEmpty) return;
     if (_picked.length == 1) _picked.first.title = _title.text;
     final items = List.of(_picked);
     unawaited(_music.startUploads(items, categoryId: categoryId));
@@ -1534,62 +1781,84 @@ class _UploadScreenState extends State<UploadScreen> {
       setState(() {
         _picked.clear();
         _rejected.clear();
-        _rights = false;
       });
     }
+  }
+
+  Future<void> _cancelUploads(MusicController music) async {
+    final confirmed = await _confirm(
+      context,
+      title: 'Stop uploading?',
+      body: 'Songs already uploaded stay in nexMusic. The rest are not sent.',
+      action: 'Stop',
+    );
+    if (confirmed) music.cancelUploads();
   }
 
   @override
   Widget build(BuildContext context) {
     final music = context.watch<MusicController>();
-    return music.uploads.isEmpty
-        ? _pickerView(music)
-        : _progressView(music);
+    return music.uploads.isEmpty ? _pickerView(music) : _progressView(music);
   }
 
   Widget _pickerView(MusicController music) {
     final muted = _muted(context);
     final error = Theme.of(context).colorScheme.error;
     final count = _picked.length;
-    final totalBytes = _picked.fold<int>(0, (sum, item) => sum + item.sizeBytes);
+    final totalBytes = _picked.fold<int>(
+      0,
+      (sum, item) => sum + item.sizeBytes,
+    );
+    final job = _job;
+    // The shared link is still being turned into audio.
+    final fetching = count == 0 && job != null && job.waiting;
+    final requested = job?.uploadRequested ?? false;
     final ready =
-        count > 0 &&
+        !requested &&
         music.categories.any((category) => category.id == _categoryId) &&
-        _rights &&
-        (count > 1 || _title.text.trim().isNotEmpty);
+        (fetching ||
+            (count > 0 && (count > 1 || _title.text.trim().isNotEmpty)));
 
     return Scaffold(
       appBar: AppBar(title: const Text('Upload')),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
         children: [
-          _FileBox(
-            title: count == 0
-                ? 'Choose songs or videos'
-                : '$count file${count == 1 ? '' : 's'} · ${_fileSize(totalBytes)}',
-            detail: count == 0
-                ? 'Pick one or many · up to 100 MB each'
-                : 'Tap to add more',
-            onTap: _pickFiles,
-            onClear: count == 0 ? null : _clear,
-          ),
+          if (count == 0 && job != null)
+            _FetchBox(job: job, onRetry: _retryJob, onBrowser: _openInBrowser)
+          else
+            _FileBox(
+              title: count == 0
+                  ? 'Choose songs or videos'
+                  : '$count file${count == 1 ? '' : 's'} · ${_fileSize(totalBytes)}',
+              detail: count == 0
+                  ? 'Pick one or many · up to 100 MB each'
+                  : 'Tap to add more',
+              onTap: _pickFiles,
+              onClear: count == 0 ? null : _clear,
+            ),
           for (final reason in _rejected)
             Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Text(reason, style: TextStyle(color: error, fontSize: 12)),
             ),
-          if (count == 1) ...[
+          if (count == 1 || fetching) ...[
             const SizedBox(height: 20),
             TextField(
               controller: _title,
               maxLength: 160,
-              onChanged: (_) => setState(() {}),
+              onChanged: (_) {
+                setState(() {});
+                _syncRequest();
+              },
               decoration: const InputDecoration(
                 labelText: 'Title',
                 counterText: '',
               ),
             ),
-            if (_canTrim && uploadKindFor(_picked.first.name) == 'audio') ...[
+            if (count == 1 &&
+                _canTrim &&
+                uploadKindFor(_picked.first.name) == 'audio') ...[
               const SizedBox(height: 12),
               _TrimRow(
                 item: _picked.first,
@@ -1626,22 +1895,15 @@ class _UploadScreenState extends State<UploadScreen> {
                 (id: category.id, name: category.name),
             ],
             selectedId: _categoryId,
-            onChanged: (id) => setState(() => _categoryId = id),
+            onChanged: (id) {
+              setState(() => _categoryId = id);
+              _syncRequest();
+            },
             onCreate: () async => (await _createCategory(context))?.id,
             createLabel: 'New category',
             onManage: () => _push(context, const CategoryManagerScreen()),
           ),
           const SizedBox(height: 12),
-          CheckboxListTile(
-            contentPadding: EdgeInsets.zero,
-            controlAffinity: ListTileControlAffinity.leading,
-            value: _rights,
-            onChanged: (value) => setState(() => _rights = value ?? false),
-            title: const Text(
-              'I have the right to share this publicly',
-              style: TextStyle(fontSize: 14),
-            ),
-          ),
           if (!music.uploadsConfigured)
             Text(
               'Uploads are not set up yet (Cloudinary).',
@@ -1650,7 +1912,15 @@ class _UploadScreenState extends State<UploadScreen> {
           const SizedBox(height: 12),
           FilledButton(
             onPressed: ready ? _upload : null,
-            child: Text(count > 1 ? 'Upload $count files' : 'Upload'),
+            child: Text(
+              requested
+                  ? 'Uploads when the audio is ready'
+                  : fetching
+                  ? 'Upload'
+                  : count > 1
+                  ? 'Upload $count files'
+                  : 'Upload',
+            ),
           ),
           const SizedBox(height: 12),
           Text(
@@ -1674,10 +1944,19 @@ class _UploadScreenState extends State<UploadScreen> {
       if (count(UploadStatus.skipped) > 0)
         '${count(UploadStatus.skipped)} already in nexMusic',
       if (failed > 0) '$failed failed',
+      if (count(UploadStatus.cancelled) > 0)
+        '${count(UploadStatus.cancelled)} cancelled',
     ].join(' · ');
+    final paused = music.uploadsPaused;
 
     return Scaffold(
-      appBar: AppBar(title: Text(uploading ? 'Uploading' : 'Upload finished')),
+      appBar: AppBar(
+        title: Text(
+          uploading
+              ? (paused ? 'Uploads paused' : 'Uploading')
+              : 'Upload finished',
+        ),
+      ),
       body: Column(
         children: [
           Padding(
@@ -1697,7 +1976,9 @@ class _UploadScreenState extends State<UploadScreen> {
                 const SizedBox(height: 8),
                 Text(
                   uploading
-                      ? 'Keep nexMusic open until the uploads finish.'
+                      ? paused
+                            ? 'Paused. A song that was halfway starts again when you resume.'
+                            : 'Keep nexMusic open until the uploads finish.'
                       : summary,
                   style: TextStyle(color: _muted(context), fontSize: 12),
                 ),
@@ -1717,7 +1998,37 @@ class _UploadScreenState extends State<UploadScreen> {
       // In the bottom bar, snackbars float above the buttons instead of
       // covering them.
       bottomNavigationBar: uploading
-          ? null
+          ? SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () => _cancelUploads(music),
+                        icon: const Icon(Icons.close_rounded),
+                        label: const Text('Cancel'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: paused
+                            ? () => unawaited(music.resumeUploads())
+                            : music.pauseUploads,
+                        icon: Icon(
+                          paused
+                              ? Icons.play_arrow_rounded
+                              : Icons.pause_rounded,
+                        ),
+                        label: Text(paused ? 'Resume' : 'Pause'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )
           : SafeArea(
               top: false,
               child: Padding(
@@ -1813,6 +2124,90 @@ class _FileBox extends StatelessWidget {
                 const SizedBox(width: 12),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// How far a shared link has got while a hidden browser turns it into audio,
+/// with a way forward if it could not.
+class _FetchBox extends StatelessWidget {
+  const _FetchBox({
+    required this.job,
+    required this.onRetry,
+    required this.onBrowser,
+  });
+  final SharedAudioJob job;
+  final VoidCallback onRetry, onBrowser;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final error = job.error;
+    return Material(
+      color: scheme.surfaceContainer,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                if (error == null)
+                  const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                else
+                  Icon(Icons.error_outline_rounded, color: scheme.error),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        error == null
+                            ? 'Getting the audio'
+                            : 'Could not get the audio',
+                        style: const TextStyle(fontWeight: FontWeight.w500),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        error ?? job.status,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            if (error != null) ...[
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: onBrowser,
+                      child: const Text('Open browser'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: onRetry,
+                      child: const Text('Try again'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
         ),
       ),
     );
@@ -1930,12 +2325,19 @@ class _UploadRow extends StatelessWidget {
         'Uploaded',
       ),
       UploadStatus.skipped => (
-        Icon(Icons.remove_circle_outline_rounded, color: scheme.onSurfaceVariant),
+        Icon(
+          Icons.remove_circle_outline_rounded,
+          color: scheme.onSurfaceVariant,
+        ),
         'Already in nexMusic',
       ),
       UploadStatus.failed => (
         Icon(Icons.error_outline_rounded, color: scheme.error),
         'Failed · ${item.error ?? 'unknown error'}',
+      ),
+      UploadStatus.cancelled => (
+        Icon(Icons.block_rounded, color: scheme.onSurfaceVariant),
+        'Cancelled',
       ),
     };
     return ListTile(
@@ -2001,8 +2403,7 @@ class _TrimScreenState extends State<TrimScreen> {
       if (!mounted) return;
       setState(
         () => _playing =
-            state.playing &&
-            state.processingState != ProcessingState.completed,
+            state.playing && state.processingState != ProcessingState.completed,
       );
     });
     _load();
@@ -2062,14 +2463,12 @@ class _TrimScreenState extends State<TrimScreen> {
     });
     await _player.pause();
     try {
-      final path = await _mediaTools.invokeMethod<String>(
-        'extractAndTrimAudio',
-        {
-          'source': widget.source,
-          'startMs': _start.inMilliseconds,
-          'endMs': end.inMilliseconds,
-        },
-      );
+      final path = await _mediaTools
+          .invokeMethod<String>('extractAndTrimAudio', {
+            'source': widget.source,
+            'startMs': _start.inMilliseconds,
+            'endMs': end.inMilliseconds,
+          });
       if (path == null) throw StateError('No trimmed file');
       if (!mounted) {
         discardTemporaryCopy(path);
@@ -2152,8 +2551,7 @@ class _TrimScreenState extends State<TrimScreen> {
               onChanged: _saving
                   ? null
                   : (values) {
-                      if (values.end - values.start <
-                          _minimum.inMilliseconds) {
+                      if (values.end - values.start < _minimum.inMilliseconds) {
                         return;
                       }
                       setState(() {
@@ -2858,7 +3256,10 @@ class ProfileScreen extends StatelessWidget {
                           music.profileEmail,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: TextStyle(color: _muted(context), fontSize: 13),
+                          style: TextStyle(
+                            color: _muted(context),
+                            fontSize: 13,
+                          ),
                         ),
                     ],
                   ),
@@ -3307,10 +3708,9 @@ class _SharedImportScreenState extends State<SharedImportScreen> {
     super.initState();
     final incoming = widget.source.trim();
     final url =
-        RegExp(r'https?://\S+')
-            .firstMatch(incoming)
-            ?.group(0)
-            ?.replaceAll(RegExp(r'[),.]+$'), '') ??
+        RegExp(
+          r'https?://\S+',
+        ).firstMatch(incoming)?.group(0)?.replaceAll(RegExp(r'[),.]+$'), '') ??
         incoming;
     _urlController = TextEditingController(text: url);
     _titleController = TextEditingController(
@@ -3747,9 +4147,210 @@ class _OwnedMediaEditorScreenState extends State<OwnedMediaEditorScreen> {
 // Browser
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// What the one button at the bottom of the browser is for, in the order a
+/// converter site walks through.
+/// A shared YouTube link being turned into an audio file by a browser kept out
+/// of sight behind the app, so the upload screen can be filled in meanwhile.
+/// When Upload is pressed before the audio arrives, the job keeps the request
+/// and uploads the file itself, so leaving the screen does not lose it.
+class SharedAudioJob extends ChangeNotifier {
+  SharedAudioJob._(this.link, this._music);
+
+  /// Starts turning [link] into audio in a hidden browser.
+  factory SharedAudioJob.start(String link, MusicController music) {
+    final job = SharedAudioJob._(link, music);
+    _jobs.add(job);
+    _publish();
+    // A converter that never finishes should not keep a browser running.
+    job._deadline = Timer(const Duration(minutes: 3), () {
+      job.fail('The converter took too long. Try again.');
+    });
+    return job;
+  }
+
+  /// Jobs whose hidden browsers are still at work.
+  static final running = ValueNotifier<List<SharedAudioJob>>(const []);
+  static final _jobs = <SharedAudioJob>[];
+
+  /// Tells the host after the current frame. Jobs start in initState and stop
+  /// in dispose, where rebuilding the host would throw.
+  static void _publish() {
+    scheduleMicrotask(() => running.value = List.unmodifiable(_jobs));
+  }
+
+  final String link;
+  final MusicController _music;
+  Timer? _deadline;
+  bool _stopped = false;
+  ({String title, String categoryId})? _request;
+
+  /// What the hidden browser is doing, in words for the upload screen.
+  String status = 'Finding a converter…';
+
+  /// Share of the file downloaded, while the converter is handing it over.
+  double? fraction;
+
+  /// The title the listener gave the song, once Upload has been pressed.
+  String? get requestTitle => _request?.title;
+
+  /// The audio file, once the converter has handed it over.
+  String? filePath;
+
+  /// Why the job gave up, if it did.
+  String? error;
+
+  bool get waiting => filePath == null && error == null && !_stopped;
+  bool get uploadRequested => _request != null;
+
+  void report(String value, {double? fraction}) {
+    if (!waiting || (value == status && fraction == this.fraction)) return;
+    status = value;
+    this.fraction = fraction;
+    notifyListeners();
+  }
+
+  /// Uploads the audio with [title] into [categoryId] as soon as it arrives.
+  /// Calling this again replaces the waiting request.
+  void requestUpload({required String title, required String categoryId}) {
+    if (!waiting) return;
+    _request = (title: title, categoryId: categoryId);
+    notifyListeners();
+    // The home screen counts songs waiting on their audio.
+    _publish();
+  }
+
+  void complete(String path) {
+    if (!waiting) {
+      discardTemporaryCopy(path);
+      return;
+    }
+    filePath = path;
+    status = 'Audio ready';
+    _end();
+    final request = _request;
+    if (request != null) _upload(path, request);
+    notifyListeners();
+  }
+
+  void fail(String message) {
+    if (!waiting) return;
+    error = message;
+    _end();
+    if (_request != null) {
+      // The listener has likely left the upload screen, so say it wherever
+      // they are now.
+      _music.announce('A shared song could not be uploaded. $message');
+    }
+    notifyListeners();
+  }
+
+  /// Stops the hidden browser once nothing needs the audio any more.
+  void cancel() {
+    if (!waiting) return;
+    _stopped = true;
+    _end();
+  }
+
+  void _end() {
+    _deadline?.cancel();
+    _jobs.remove(this);
+    _publish();
+  }
+
+  void _upload(String path, ({String title, String categoryId}) request) {
+    final file = File(path);
+    final name = _fileName(path);
+    final size = file.existsSync() ? file.lengthSync() : 0;
+    if (uploadKindFor(name) == null || size == 0 || size >= maxUploadBytes) {
+      error = 'The converter sent a file nexMusic cannot upload.';
+      _music.announce('A shared song could not be uploaded. $error');
+      discardTemporaryCopy(path);
+      return;
+    }
+    final named = request.title.isNotEmpty
+        ? request.title
+        : name.replaceAll(RegExp(r'\.[^.]+$'), '');
+    final item = UploadItem(
+      path: path,
+      name: name,
+      sizeBytes: size,
+      title: named.length > 160 ? named.substring(0, 160) : named,
+    );
+    void start() =>
+        unawaited(_music.startUploads([item], categoryId: request.categoryId));
+    if (!_music.uploading) {
+      start();
+      return;
+    }
+    // Another batch is still going, and startUploads turns a new batch away
+    // until it ends, so this song waits for its turn.
+    void wait() {
+      if (_music.uploading) return;
+      _music.removeListener(wait);
+      start();
+    }
+
+    _music.addListener(wait);
+  }
+}
+
+/// Keeps the browsers of [SharedAudioJob]s running behind the whole app. A
+/// converter page needs a real on-screen size to lay out and for its buttons
+/// to be found, so each hidden browser fills the screen under the app's own
+/// pages rather than being taken out of the widget tree.
+class SharedAudioHost extends StatelessWidget {
+  const SharedAudioHost({super.key, required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Stack(
+    fit: StackFit.expand,
+    children: [
+      // One fixed layer, so the app above keeps its place and its state however
+      // many hidden browsers come and go.
+      IgnorePointer(
+        child: ExcludeSemantics(
+          child: ValueListenableBuilder<List<SharedAudioJob>>(
+            valueListenable: SharedAudioJob.running,
+            builder: (context, jobs, _) => Stack(
+              fit: StackFit.expand,
+              children: [
+                for (final job in jobs)
+                  NexBrowserScreen(
+                    key: ObjectKey(job),
+                    sharedLink: 'youtube to mp3',
+                    pasteLink: job.link,
+                    job: job,
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      child,
+    ],
+  );
+}
+
+enum _BrowserStep { opening, paste, convert, converting, download, downloading }
+
 class NexBrowserScreen extends StatefulWidget {
-  const NexBrowserScreen({super.key, required this.sharedLink});
+  const NexBrowserScreen({
+    super.key,
+    required this.sharedLink,
+    this.pasteLink = '',
+    this.job,
+  });
   final String sharedLink;
+
+  /// When set, the browser runs out of sight for this job: it shows no
+  /// controls or messages, and the finished file goes to the job instead of
+  /// opening another upload screen.
+  final SharedAudioJob? job;
+
+  /// Link shared into nexMusic, offered as a one-tap paste on whichever site
+  /// the listener opens.
+  final String pasteLink;
 
   @override
   State<NexBrowserScreen> createState() => _NexBrowserScreenState();
@@ -3768,6 +4369,62 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
   /// Main-frame URLs requested without a page starting. The Android WebView
   /// hands a file download back as a repeat request for the same URL.
   final Map<String, int> _unstarted = {};
+
+  /// True once an ordinary site, rather than a search page, has finished
+  /// loading, so the paste and convert buttons belong on screen.
+  bool _siteOpen = false;
+
+  /// What the open site offers right now, read back from the page itself: a
+  /// convert button, a download button ready to press, or work in progress.
+  bool _hasConvert = false;
+  bool _ready = false;
+  bool _busy = false;
+
+  /// How far the listener has got with this site. It only ever moves
+  /// forward, and a tap moves it at once, so reading the page can never throw
+  /// the button back to an earlier step or jump it ahead to a later one.
+  _BrowserStep _phase = _BrowserStep.paste;
+
+  /// Readings in a row where a converting site reported neither work in
+  /// progress nor a file, so the button can be put back rather than stick.
+  int _idleReads = 0;
+
+  /// Adverts that took the place of the file. These sites throw one up on the
+  /// first press of their own download button, so a couple of presses are
+  /// tried before giving up.
+  int _adRetries = 0;
+
+  /// When the listener last asked for the file. An advert opened in its place
+  /// counts as part of that request, however the page's own buttons flicker
+  /// while it happens.
+  DateTime? _downloadTapAt;
+
+  /// True once the top search result has been opened for a shared link, so
+  /// coming back to the search page leaves the choice to the listener.
+  bool _topResultOpened = false;
+  bool _findingTopResult = false;
+
+  /// Presses the app has made by itself on this page, per step, so a site
+  /// that will not respond is left to the listener after a few tries.
+  final Map<_BrowserStep, int> _autoTries = {};
+  DateTime? _lastAutoAt;
+
+  /// True once a file has started coming from this page, so coming back from
+  /// the upload screen does not fetch it a second time.
+  bool _fileTaken = false;
+  bool _working = false;
+
+  /// True while a page is still on its way in, so the button says so instead
+  /// of offering an action read off the page being replaced.
+  bool _loading = false;
+
+  /// Counts page loads, so a reading that began on an earlier page is thrown
+  /// away rather than believed.
+  int _pageRun = 0;
+
+  /// Re-reads the open site's buttons, because a converter swaps Convert for
+  /// Download without ever loading another page.
+  Timer? _actionTimer;
 
   @override
   void initState() {
@@ -3792,7 +4449,26 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
           onPageStarted: (url) {
             _currentPage = url;
             _unstarted.remove(url);
+            _pageRun++;
+            _actionTimer?.cancel();
+            _autoTries.clear();
+            _lastAutoAt = DateTime.now();
+            _fileTaken = false;
+            if (mounted) {
+              setState(() {
+                _loading = true;
+                _siteOpen = false;
+                _hasConvert = false;
+                _ready = false;
+                _busy = false;
+                _phase = _BrowserStep.paste;
+                _idleReads = 0;
+                _adRetries = 0;
+                _downloadTapAt = null;
+              });
+            }
           },
+          onPageFinished: _onPageFinished,
           onUrlChange: (change) {
             final url = change.url;
             if (url != null && !url.startsWith('data:')) {
@@ -3805,6 +4481,9 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
                 (uri.scheme != 'https' && uri.scheme != 'http')) {
               if (request.isMainFrame &&
                   (uri?.scheme == 'blob' || uri?.scheme == 'data')) {
+                widget.job?.fail(
+                  'The converter builds its file in a way nexMusic cannot capture.',
+                );
                 _snack(
                   'This site builds its download inside the page, which nexMusic cannot capture. Try another site.',
                 );
@@ -3812,6 +4491,40 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
               return NavigationDecision.prevent;
             }
             if (!request.isMainFrame) return NavigationDecision.navigate;
+            if (_siteOpen && !_loading && uploadKindFor(uri.path) == null) {
+              // These sites open an advert on the first press of their own
+              // download button, and their pages carry links back to YouTube.
+              // Staying on the converter keeps the file within reach instead
+              // of losing the page. A file, or the site's own delivery host,
+              // still gets through.
+              String base(String host) {
+                final parts = host.toLowerCase().split('.');
+                if (parts.length < 2) return host.toLowerCase();
+                return parts.sublist(parts.length - 2).join('.');
+              }
+
+              final here = Uri.tryParse(_currentPage ?? '')?.host ?? '';
+              if (here.isNotEmpty && base(here) != base(uri.host)) {
+                // A converter normally serves the finished file from a CDN,
+                // which is also a different host. Try the URL as media first
+                // instead of rejecting every cross-host request as an advert.
+                // If it is HTML, keep this page open and retry the converter's
+                // button; that preserves the advert protection.
+                final asked = _downloadTapAt;
+                final wantsFile =
+                    asked != null &&
+                    DateTime.now().difference(asked) <
+                        const Duration(seconds: 20);
+                if (wantsFile) {
+                  unawaited(_saveDownload(uri, keepConverterOnWebPage: true));
+                } else {
+                  _snack(
+                    'That link led away from the converter; it was blocked.',
+                  );
+                }
+                return NavigationDecision.prevent;
+              }
+            }
             final attempts = _unstarted[request.url] =
                 (_unstarted[request.url] ?? 0) + 1;
             if (attempts > 3) {
@@ -3877,6 +4590,11 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
 
   void _snack(String message) {
     if (!mounted) return;
+    if (widget.job != null) {
+      // Nobody sees a hidden browser; the upload screen shows the job instead.
+      debugPrint('nexBrowser: $message');
+      return;
+    }
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
@@ -3895,13 +4613,18 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
 
   /// Downloads a song or video a page links to and opens the upload screen
   /// with it. Links that turn out to be ordinary pages open in the browser.
-  Future<void> _saveDownload(Uri url) async {
+  Future<void> _saveDownload(
+    Uri url, {
+    bool keepConverterOnWebPage = false,
+  }) async {
+    if (!mounted) return;
     if (_downloading) {
       _snack('A download is already running.');
       return;
     }
     setState(() {
       _downloading = true;
+      _fileTaken = true;
       _progress = 1;
     });
     _snack('Downloading for nexMusic…');
@@ -3927,12 +4650,24 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
       _progress = 0;
     });
     if (result.isWebPage) {
+      if (keepConverterOnWebPage) {
+        _retryAfterAdvert();
+        return;
+      }
       await _browser.loadRequest(url);
       return;
     }
     final filePath = result.path;
     if (filePath == null) {
-      _snack(result.error ?? 'Download failed.');
+      final message = result.error ?? 'Download failed.';
+      widget.job?.fail(message);
+      _snack(message);
+      return;
+    }
+    _downloadTapAt = null;
+    final job = widget.job;
+    if (job != null) {
+      job.complete(filePath);
       return;
     }
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
@@ -3947,10 +4682,492 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     }
   }
 
-  Future<void> _searchYouTube(String input) {
-    final query = input.trim().isEmpty ? 'music' : input.trim();
-    return _go(
-      'https://www.youtube.com/results?search_query=${Uri.encodeComponent(query)}',
+  /// A cross-host URL requested by a converter can be either its media CDN or
+  /// an advert. [_saveDownload] identifies it from the response MIME type; an
+  /// HTML response lands here without ever replacing the converter page.
+  void _retryAfterAdvert() {
+    final asked = _downloadTapAt;
+    final stillWaiting =
+        asked != null &&
+        DateTime.now().difference(asked) < const Duration(seconds: 20);
+    if (stillWaiting && _adRetries < 2) {
+      _adRetries += 1;
+      _snack('Advert blocked; asking for the file again.');
+      Future<void>.delayed(const Duration(milliseconds: 600), () {
+        if (mounted) unawaited(_tapPageAction(_downloadWords));
+      });
+      return;
+    }
+    widget.job?.fail('The converter only offered adverts, not the file.');
+    _snack('That link was not an audio or video download.');
+  }
+
+  /// Presses the first ordinary result on a search page. Google sends its own
+  /// results through /goto or /url and its adverts through /aclk, so only the
+  /// first two count; other engines link straight to the site.
+  static const _topResultScript = r'''
+(function(){
+  var heads=document.querySelectorAll('[role="heading"], h3');
+  for(var i=0;i<heads.length;i++){
+    var head=heads[i];
+    if(head.getBoundingClientRect().height<=0) continue;
+    var link=head.closest('a');
+    if(!link) continue;
+    var href=link.getAttribute('href')||'';
+    var organic=/^\/(goto|url)\?/.test(href);
+    if(!organic&&/^https?:/.test(href)){
+      try{
+        var host=new URL(href).hostname;
+        organic=!/(^|\.)(google|googleadservices|doubleclick)\./.test(host);
+      }catch(e){}
+    }
+    if(!organic) continue;
+    link.click();
+    return 'ok';
+  }
+  return 'none';
+})()
+''';
+
+  /// Reads what the site is offering right now: a convert button, a download
+  /// button, whether that download is ready to press, and whether the site is
+  /// still working. A converter swaps these around without loading a page.
+  static const _actionScript = r'''
+(function(){
+  var els=document.querySelectorAll('button,input[type=submit],input[type=button],a,[role=button]');
+  var convert=false,download=false,ready=false,convertOff=false;
+  for(var i=0;i<els.length;i++){
+    var el=els[i];
+    var label=((el.innerText||el.value||el.getAttribute('aria-label')||'')+'').toLowerCase();
+    if(!label) continue;
+    var off=el.disabled===true||el.getAttribute('aria-disabled')==='true';
+    if(!off&&window.getComputedStyle){
+      var style=window.getComputedStyle(el);
+      if(style&&(style.pointerEvents==='none'||parseFloat(style.opacity||'1')<0.5)) off=true;
+    }
+    if(label.indexOf('convert')>-1&&label.indexOf('convert more')<0){
+      convert=true;
+      if(off) convertOff=true;
+    }
+    if(label.indexOf('download')>-1||label.indexOf('save mp3')>-1){
+      download=true;
+      if(!off) ready=true;
+    }
+  }
+  var busy=(download&&!ready)||(convert&&convertOff&&!ready);
+  return JSON.stringify({convert:convert,download:download,ready:ready,busy:busy});
+})()
+''';
+
+  /// Types a link into the site's own box. Converter sites often keep their
+  /// box inside a shadow root and drive it from a framework, so this looks
+  /// through shadow roots and sets the value the way the page expects.
+  static const _pasteScript = r'''
+(function(link){
+  var boxes=[];
+  function collect(root){
+    if(!root||!root.querySelectorAll) return;
+    var fields=root.querySelectorAll('input,textarea');
+    for(var i=0;i<fields.length;i++){
+      var type=(fields[i].getAttribute('type')||'text').toLowerCase();
+      if(type==='hidden'||type==='checkbox'||type==='radio') continue;
+      if(type==='submit'||type==='button'||type==='file') continue;
+      boxes.push(fields[i]);
+    }
+    var all=root.querySelectorAll('*');
+    for(var j=0;j<all.length;j++) if(all[j].shadowRoot) collect(all[j].shadowRoot);
+  }
+  collect(document);
+  var best=null,bestScore=-1;
+  for(var k=0;k<boxes.length;k++){
+    var box=boxes[k];
+    var rect=box.getBoundingClientRect();
+    if(rect.width<60||rect.height<8) continue;
+    var hint=((box.getAttribute('placeholder')||'')+' '+(box.getAttribute('name')||'')+' '+(box.id||'')+' '+(box.className||'')).toLowerCase();
+    var score=rect.width;
+    if(hint.indexOf('url')>-1||hint.indexOf('link')>-1) score+=10000;
+    if(hint.indexOf('youtube')>-1||hint.indexOf('search')>-1) score+=10000;
+    if(score>bestScore){bestScore=score;best=box;}
+  }
+  if(!best) return 'none';
+  best.focus();
+  var native=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(best),'value');
+  if(native&&native.set) native.set.call(best,link); else best.value=link;
+  best.dispatchEvent(new Event('input',{bubbles:true}));
+  best.dispatchEvent(new Event('change',{bubbles:true}));
+  return 'ok';
+})(__LINK__)
+''';
+
+  /// Presses the site's own button with the given word on it. Adverts on
+  /// converter pages wear the same words and lead away to other sites, so
+  /// candidates are scored and a link to another host is refused outright.
+  static const _clickScript = r'''
+(function(words){
+  var els=document.querySelectorAll('button,input[type=submit],input[type=button],a,[role=button]');
+  var here=location.hostname.replace(/^www\./,'');
+  var best=null,bestScore=0;
+  function hit(label,word){
+    if(word.length<=3) return new RegExp('(^|[^a-z])'+word+'([^a-z]|$)').test(label);
+    return label.indexOf(word)>-1;
+  }
+  for(var i=0;i<els.length;i++){
+    var el=els[i];
+    var label=((el.innerText||el.value||el.getAttribute('aria-label')||'')+'').trim().toLowerCase();
+    if(!label) continue;
+    if(el.disabled===true||el.getAttribute('aria-disabled')==='true') continue;
+    var rect=el.getBoundingClientRect();
+    if(rect.width<20||rect.height<10) continue;
+    var rank=-1;
+    for(var w=0;w<words.length;w++){ if(hit(label,words[w])){rank=w;break;} }
+    if(rank<0) continue;
+    var word=words[rank];
+    var score=100+(words.length-rank)*200;
+    if(label===word) score+=1000; else if(label.indexOf(word)===0) score+=500;
+    if(label.length>28) score-=400;
+    var tag=el.tagName.toLowerCase();
+    if(tag==='button'||tag==='input') score+=500;
+    else if(el.getAttribute('role')==='button') score+=300;
+    if(tag==='a'){
+      if(el.getAttribute('target')==='_blank') score-=300;
+      var rel=(el.getAttribute('rel')||'').toLowerCase();
+      if(rel.indexOf('sponsored')>-1||rel.indexOf('nofollow')>-1) score-=500;
+      try{
+        var host=new URL(el.getAttribute('href')||'',location.href).hostname.replace(/^www\./,'');
+        if(host&&host!==here) score-=2000;
+      }catch(e){}
+    }
+    if(score>bestScore){bestScore=score;best=el;}
+  }
+  if(!best) return 'none';
+  best.click();
+  return 'ok';
+})(__WORDS__)
+''';
+
+  /// Reads a value back from the page. Android hands the result over as a
+  /// JSON string, so it can arrive encoded twice.
+  Object? _decodeJs(Object? value) {
+    var decoded = value;
+    for (var round = 0; round < 2; round++) {
+      if (decoded is! String) break;
+      try {
+        decoded = jsonDecode(decoded);
+      } catch (_) {
+        return decoded;
+      }
+    }
+    return decoded;
+  }
+
+  /// True for a search engine's result page. The converter sites stay on
+  /// offer there; the paste and convert buttons only belong on the site the
+  /// listener actually opens.
+  bool _isSearchPage(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return false;
+    final host = uri.host.toLowerCase();
+    final path = uri.path.toLowerCase();
+    if (host.contains('google.') && path.startsWith('/search')) return true;
+    if (host.contains('bing.') && path.startsWith('/search')) return true;
+    return host.contains('duckduckgo.');
+  }
+
+  Future<void> _onPageFinished(String url) async {
+    if (!mounted || url.startsWith('data:') || url.startsWith('about:')) return;
+    final run = _pageRun;
+    setState(() => _loading = false);
+    if (_isSearchPage(url)) {
+      unawaited(_openTopResult());
+      return;
+    }
+    await _detectPageAction(run);
+  }
+
+  /// Opens the first ordinary result of the search a shared link started, so
+  /// the listener lands straight on a converter. Results can appear a moment
+  /// after the page reports itself loaded, so this looks a few times.
+  Future<void> _openTopResult() async {
+    if (_topResultOpened || _findingTopResult || widget.pasteLink.isEmpty) {
+      return;
+    }
+    _findingTopResult = true;
+    try {
+      for (var attempt = 0; attempt < 10; attempt++) {
+        if (!mounted || !_isSearchPage(_currentPage ?? '')) return;
+        try {
+          final decoded = _decodeJs(
+            await _browser.runJavaScriptReturningResult(_topResultScript),
+          );
+          if (decoded == 'ok') {
+            _topResultOpened = true;
+            return;
+          }
+        } catch (error) {
+          debugPrint('nexBrowser: top result failed: $error');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
+      widget.job?.fail('No converter site was found for this link.');
+      _snack('No site found on this search; pick one yourself.');
+    } finally {
+      _findingTopResult = false;
+    }
+  }
+
+  /// Reads what the open site offers now, so the one button can follow it.
+  /// [run] is the page load this reading belongs to; a newer load throws the
+  /// reading away, so the button never shows an action from the old page.
+  Future<void> _detectPageAction(int run) async {
+    bool convert = false, ready = false, busy = false;
+    try {
+      final decoded = _decodeJs(
+        await _browser.runJavaScriptReturningResult(_actionScript),
+      );
+      if (decoded is Map) {
+        convert = decoded['convert'] == true;
+        ready = decoded['ready'] == true;
+        busy = decoded['busy'] == true;
+      }
+    } catch (error) {
+      debugPrint('nexBrowser: action probe failed: $error');
+    }
+    if (!mounted || run != _pageRun || _loading) return;
+    // Reading the page may only carry the button on from Converting to
+    // Download. Every other step is set by the listener's own tap, which is
+    // what keeps the button from flickering while a site settles.
+    var phase = _phase;
+    var idle = _idleReads;
+    if (phase == _BrowserStep.converting) {
+      if (ready) {
+        phase = _BrowserStep.download;
+        idle = 0;
+      } else if (busy) {
+        idle = 0;
+      } else {
+        idle += 1;
+        // The site is offering neither work nor a file, so put the button
+        // back instead of leaving it stuck on Converting.
+        if (idle >= 12) {
+          phase = _BrowserStep.convert;
+          idle = 0;
+        }
+      }
+    }
+    if (_siteOpen &&
+        _hasConvert == convert &&
+        _ready == ready &&
+        _busy == busy &&
+        _phase == phase &&
+        _idleReads == idle) {
+      _autoAdvance();
+      _startActionWatch(run);
+      return;
+    }
+    setState(() {
+      _siteOpen = true;
+      _hasConvert = convert;
+      _ready = ready;
+      _busy = busy;
+      _phase = phase;
+      _idleReads = idle;
+    });
+    _autoAdvance();
+    _startActionWatch(run);
+  }
+
+  /// For a shared link, presses the next step by itself once the page is
+  /// ready for it, so the listener only has to watch: Paste, then Convert,
+  /// then Download. Each step gets a few spaced-out tries; after that the
+  /// button is left to the listener, and only the last try says what failed.
+  void _autoAdvance() {
+    if (!mounted || widget.pasteLink.isEmpty) return;
+    if (!_siteOpen || _loading || _working || _downloading || _fileTaken) {
+      return;
+    }
+    final step = _step;
+    final limit = switch (step) {
+      _BrowserStep.paste => 6,
+      _BrowserStep.convert => 3,
+      _BrowserStep.download => 2,
+      _ => 0,
+    };
+    final tries = _autoTries[step] ?? 0;
+    // Give the site a moment between presses. A download waits longer,
+    // because the file may still be on its way while the page looks idle.
+    final gap = step == _BrowserStep.download
+        ? const Duration(seconds: 4)
+        : const Duration(milliseconds: 1200);
+    final last = _lastAutoAt;
+    final waited = last == null || DateTime.now().difference(last) >= gap;
+    if (tries >= limit) {
+      // Every try is spent and the page has not moved on. A hidden browser has
+      // nobody to hand the button to, so its job ends here.
+      if (limit > 0 && waited) widget.job?.fail(_stepFailure(step));
+      return;
+    }
+    if (!waited) return;
+    _autoTries[step] = tries + 1;
+    _lastAutoAt = DateTime.now();
+    unawaited(_runStep(quiet: tries + 1 < limit));
+  }
+
+  /// Keeps re-reading the site's buttons. A converter finishes its work
+  /// without loading a new page, so the button has to follow the page itself
+  /// rather than the page load.
+  void _startActionWatch(int run) {
+    if (_actionTimer?.isActive ?? false) return;
+    _actionTimer = Timer.periodic(const Duration(milliseconds: 400), (timer) {
+      if (!mounted || !_siteOpen || run != _pageRun) {
+        timer.cancel();
+        return;
+      }
+      unawaited(_detectPageAction(run));
+    });
+  }
+
+  /// Types the shared link into the site's own box.
+  Future<void> _pasteSharedLink({bool quiet = false}) async {
+    var link = widget.pasteLink.trim();
+    if (link.isEmpty) {
+      final clipboard = await Clipboard.getData(Clipboard.kTextPlain);
+      link = clipboard?.text?.trim() ?? '';
+    }
+    if (link.isEmpty) {
+      _snack('There is no link to paste.');
+      return;
+    }
+    try {
+      final decoded = _decodeJs(
+        await _browser.runJavaScriptReturningResult(
+          _pasteScript.replaceFirst('__LINK__', jsonEncode(link)),
+        ),
+      );
+      if (decoded == 'ok' && mounted) {
+        setState(() => _phase = _BrowserStep.convert);
+      }
+      if (decoded == 'ok') {
+        _snack('Link pasted.');
+      } else if (!quiet) {
+        _snack('No box found on this page; paste it by hand.');
+      }
+    } catch (_) {
+      if (!quiet) _snack('This page would not take the link.');
+    }
+  }
+
+  /// Words a converter puts on the button that starts the work. Sites label
+  /// it anything from "Convert" to a bare "Go", so they are tried in turn.
+  static const _convertWords = [
+    'convert',
+    'start',
+    'submit',
+    'continue',
+    'proceed',
+    'done',
+    'go',
+    'ok',
+  ];
+
+  /// Words a site puts on the button that hands the finished file over.
+  static const _downloadWords = ['download', 'save', 'get link', 'direct'];
+
+  /// Presses the site's own button, trying [words] in order of preference.
+  Future<void> _tapPageAction(List<String> words, {bool quiet = false}) async {
+    setState(() => _working = true);
+    try {
+      final decoded = _decodeJs(
+        await _browser.runJavaScriptReturningResult(
+          _clickScript.replaceFirst('__WORDS__', jsonEncode(words)),
+        ),
+      );
+      if (decoded != 'ok' && !quiet) {
+        _snack('No ${words.first} button found; use the site\'s own button.');
+      }
+    } catch (_) {
+      if (!quiet) _snack('This page would not take the tap.');
+    }
+    if (mounted) setState(() => _working = false);
+    // Read the page straight away rather than waiting for the next tick, so
+    // the button follows the tap without a visible pause.
+    await _detectPageAction(_pageRun);
+  }
+
+  /// How far the listener has got, which is what the single button offers.
+  _BrowserStep get _step {
+    if (_downloading) return _BrowserStep.downloading;
+    return _phase;
+  }
+
+  /// Carries out the step the button shows. [quiet] keeps a failed press from
+  /// saying so, for the app's own early tries at a step.
+  Future<void> _runStep({bool quiet = false}) async {
+    switch (_step) {
+      case _BrowserStep.paste:
+        await _pasteSharedLink(quiet: quiet);
+      case _BrowserStep.convert:
+        // Carry the button on at once. Waiting for the page to report back
+        // is what left it showing the wrong thing for a second or two.
+        setState(() {
+          _phase = _BrowserStep.converting;
+          _idleReads = 0;
+        });
+        await _tapPageAction(_convertWords, quiet: quiet);
+      case _BrowserStep.download:
+        _downloadTapAt = DateTime.now();
+        setState(() => _phase = _BrowserStep.downloading);
+        await _tapPageAction(_downloadWords, quiet: quiet);
+        // No download started, so put the button back rather than stick.
+        if (mounted && !_downloading) {
+          setState(() => _phase = _BrowserStep.download);
+        }
+      case _BrowserStep.opening:
+      case _BrowserStep.converting:
+      case _BrowserStep.downloading:
+        break;
+    }
+  }
+
+  /// One button that follows the site: Paste, then Convert, then Converting
+  /// while it works, then Download, then Downloading.
+  Widget _actionsBar() {
+    final step = _step;
+    final waiting =
+        step == _BrowserStep.opening ||
+        step == _BrowserStep.converting ||
+        step == _BrowserStep.downloading;
+    final label = switch (step) {
+      _BrowserStep.opening => 'Opening…',
+      _BrowserStep.paste => 'Paste',
+      _BrowserStep.convert => 'Convert',
+      _BrowserStep.converting => 'Converting…',
+      _BrowserStep.download => 'Download',
+      _BrowserStep.downloading => 'Downloading…',
+    };
+    final icon = switch (step) {
+      _BrowserStep.paste => Icons.content_paste_rounded,
+      _BrowserStep.convert => Icons.autorenew_rounded,
+      _BrowserStep.download => Icons.download_rounded,
+      _ => Icons.hourglass_top_rounded,
+    };
+    return Padding(
+      // A fixed gap below the button, because phones that report no bottom
+      // inset would otherwise put it flush against the edge of the screen.
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+      child: SizedBox(
+        width: double.infinity,
+        child: FilledButton.icon(
+          onPressed: waiting || _working ? null : _runStep,
+          icon: waiting
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Icon(icon, size: 18),
+          label: Text(label),
+        ),
+      ),
     );
   }
 
@@ -4022,6 +5239,7 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
 
   @override
   void dispose() {
+    _actionTimer?.cancel();
     _addressController.dispose();
     _firstPillController.removeListener(_saveFirstPill);
     _secondPillController.removeListener(_saveSecondPill);
@@ -4030,11 +5248,48 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     super.dispose();
   }
 
+  /// What a hidden browser is doing, in words for the upload screen.
+  String _jobStatus() {
+    if (!_siteOpen || _loading) {
+      return _topResultOpened
+          ? 'Opening the converter…'
+          : 'Finding a converter…';
+    }
+    return switch (_step) {
+      _BrowserStep.opening => 'Opening the converter…',
+      _BrowserStep.paste => 'Pasting the link…',
+      _BrowserStep.convert => 'Starting the conversion…',
+      _BrowserStep.converting => 'Converting…',
+      _BrowserStep.download => 'Getting the file…',
+      _BrowserStep.downloading =>
+        _progress > 1 ? 'Downloading $_progress%' : 'Downloading…',
+    };
+  }
+
+  String _stepFailure(_BrowserStep step) => switch (step) {
+    _BrowserStep.paste => 'The converter had no box to paste the link into.',
+    _BrowserStep.convert => 'The converter did not start converting.',
+    _BrowserStep.download => 'The converter did not hand over the file.',
+    _ => 'The converter stopped responding.',
+  };
+
   @override
   Widget build(BuildContext context) {
+    final job = widget.job;
+    if (job != null) {
+      final status = _jobStatus();
+      final fraction = _step == _BrowserStep.downloading && _progress > 1
+          ? _progress / 100
+          : null;
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => job.report(status, fraction: fraction),
+      );
+      return WebViewWidget(controller: _browser);
+    }
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 0,
+        automaticallyImplyLeading: false,
         title: TextField(
           controller: _addressController,
           keyboardType: TextInputType.url,
@@ -4045,13 +5300,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
             isDense: true,
           ),
         ),
-        actions: [
-          IconButton(
-            tooltip: 'Go',
-            onPressed: () => _go(_addressController.text),
-            icon: const Icon(Icons.arrow_forward_rounded),
-          ),
-        ],
         bottom: _progress > 0 && _progress < 100
             ? PreferredSize(
                 preferredSize: const Size.fromHeight(2),
@@ -4065,45 +5313,9 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
       body: WebViewWidget(controller: _browser),
       bottomNavigationBar: SafeArea(
         top: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          child: Row(
-            children: [
-              IconButton(
-                tooltip: 'Back',
-                onPressed: () async {
-                  if (await _browser.canGoBack()) _browser.goBack();
-                },
-                icon: const Icon(Icons.arrow_back_rounded),
-              ),
-              IconButton(
-                tooltip: 'Forward',
-                onPressed: () async {
-                  if (await _browser.canGoForward()) _browser.goForward();
-                },
-                icon: const Icon(Icons.arrow_forward_rounded),
-              ),
-              IconButton(
-                tooltip: 'Home',
-                onPressed: () {
-                  _addressController.clear();
-                  _browser.loadHtmlString(_startPage);
-                },
-                icon: const Icon(Icons.home_outlined),
-              ),
-              const Spacer(),
-              IconButton(
-                tooltip: 'Search YouTube',
-                onPressed: () => _searchYouTube(_addressController.text),
-                icon: const Icon(Icons.smart_display_rounded),
-              ),
-              IconButton(
-                tooltip: 'Shortcuts',
-                onPressed: _showQuickPanel,
-                icon: const Icon(Icons.bolt_rounded),
-              ),
-            ],
-          ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [if (_siteOpen && !_loading) _actionsBar()],
         ),
       ),
     );

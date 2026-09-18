@@ -26,12 +26,18 @@ class Song {
     this.categoryId = '',
     this.ownerUid = '',
     this.ownerName = '',
+    this.artist = '',
+    this.artworkUrl = '',
+    this.providerId = '',
+    this.sourceId = '',
     this.publicId,
     this.storagePath,
     this.sizeBytes = 0,
+    this.durationMs = 0,
     this.createdAt,
   });
   final String id, title, kind, url, categoryId, ownerUid, ownerName;
+  final String artist, artworkUrl, providerId, sourceId;
 
   /// Cloudinary id of a public upload.
   final String? publicId;
@@ -39,10 +45,12 @@ class Song {
   /// Firebase Storage path of a private library file.
   final String? storagePath;
   final int sizeBytes;
+  final int durationMs;
   final DateTime? createdAt;
 
   bool get isVideo => kind == 'video';
   bool get isPrivate => id.startsWith(privateSongPrefix);
+  bool get isProvider => providerId.isNotEmpty;
 
   Song copyWith({String? title, String? categoryId, String? url}) => Song(
     id: id,
@@ -52,9 +60,14 @@ class Song {
     categoryId: categoryId ?? this.categoryId,
     ownerUid: ownerUid,
     ownerName: ownerName,
+    artist: artist,
+    artworkUrl: artworkUrl,
+    providerId: providerId,
+    sourceId: sourceId,
     publicId: publicId,
     storagePath: storagePath,
     sizeBytes: sizeBytes,
+    durationMs: durationMs,
     createdAt: createdAt,
   );
 
@@ -66,8 +79,13 @@ class Song {
     'categoryId': categoryId,
     'ownerUid': ownerUid,
     'ownerName': ownerName,
+    'artist': artist,
+    'artworkUrl': artworkUrl,
+    'providerId': providerId,
+    'sourceId': sourceId,
     'publicId': publicId,
     'sizeBytes': sizeBytes,
+    'durationMs': durationMs,
     'createdAt': createdAt?.millisecondsSinceEpoch,
   };
 
@@ -75,7 +93,12 @@ class Song {
   static Song? fromJson(Map<String, dynamic> json) {
     final id = json['id'];
     final url = json['url'];
-    if (id is! String || id.isEmpty || url is! String || url.isEmpty) {
+    final providerId = json['providerId'] as String? ?? '';
+    final sourceId = json['sourceId'] as String? ?? '';
+    if (id is! String ||
+        id.isEmpty ||
+        url is! String ||
+        (url.isEmpty && (providerId.isEmpty || sourceId.isEmpty))) {
       return null;
     }
     final createdAt = json['createdAt'];
@@ -87,8 +110,13 @@ class Song {
       categoryId: json['categoryId'] as String? ?? '',
       ownerUid: json['ownerUid'] as String? ?? '',
       ownerName: json['ownerName'] as String? ?? '',
+      artist: json['artist'] as String? ?? '',
+      artworkUrl: json['artworkUrl'] as String? ?? '',
+      providerId: providerId,
+      sourceId: sourceId,
       publicId: json['publicId'] as String?,
       sizeBytes: (json['sizeBytes'] as num?)?.toInt() ?? 0,
+      durationMs: (json['durationMs'] as num?)?.toInt() ?? 0,
       createdAt: createdAt is int
           ? DateTime.fromMillisecondsSinceEpoch(createdAt)
           : null,
@@ -96,7 +124,7 @@ class Song {
   }
 }
 
-enum UploadStatus { queued, uploading, done, skipped, failed }
+enum UploadStatus { queued, uploading, done, skipped, failed, cancelled }
 
 /// One file in the public upload queue. The controller updates it in place
 /// and notifies its listeners.
@@ -149,6 +177,7 @@ class UploadItem {
     trimEnd = null;
     return trimmedPath;
   }
+
   String categoryId = '';
   UploadStatus status = UploadStatus.queued;
 

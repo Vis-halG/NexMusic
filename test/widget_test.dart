@@ -54,11 +54,27 @@ Widget _app(MusicController controller, {Widget? home}) =>
       value: controller,
       child: home == null
           ? const NexMusicApp()
-          : MaterialApp(
-              theme: NexMusicApp.theme(Brightness.light),
-              home: home,
-            ),
+          : MaterialApp(theme: NexMusicApp.theme(Brightness.light), home: home),
     );
+
+/// A page with the upload screen for a shared link one tap away, so the upload
+/// screen has somewhere to close back to.
+class _SharedLinkOpener extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: Center(
+      child: TextButton(
+        onPressed: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) =>
+                const UploadScreen(sharedLink: 'https://youtu.be/abc'),
+          ),
+        ),
+        child: const Text('Open shared link'),
+      ),
+    ),
+  );
+}
 
 void _usePhone(WidgetTester tester, Size size) {
   tester.view.physicalSize = size;
@@ -206,9 +222,8 @@ void main() {
     expect(upload, findsOneWidget);
     expect(tester.widget<FilledButton>(upload).onPressed, isNull);
 
-    // Category and rights alone are not enough without any files.
+    // A category alone is not enough without any files.
     await tester.tap(find.text('Lo-fi'));
-    await tester.tap(find.byType(Checkbox));
     await tester.pump();
     expect(tester.widget<FilledButton>(upload).onPressed, isNull);
     expect(tester.takeException(), isNull);
@@ -234,12 +249,11 @@ void main() {
           ..status = UploadStatus.done
           ..progress = 1,
         UploadItem(
-            path: 'b.mp3',
-            name: 'b.mp3',
-            sizeBytes: 3000000,
-            title: 'Song B',
-          )
-          ..status = UploadStatus.skipped,
+          path: 'b.mp3',
+          name: 'b.mp3',
+          sizeBytes: 3000000,
+          title: 'Song B',
+        )..status = UploadStatus.skipped,
         UploadItem(
             path: 'c.mp3',
             name: 'c.mp3',
@@ -327,6 +341,169 @@ void main() {
 
     expect(find.text('1 file · 2 KB'), findsOneWidget);
     expect(find.text('Trim audio'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+  });
+
+  testWidgets('a shared link can be sent to upload before its audio is ready', (
+    tester,
+  ) async {
+    _usePhone(tester, const Size(1080, 2340));
+    final controller = await _controller()
+      ..signedIn = true
+      ..categories = _categories;
+
+    await tester.pumpWidget(_app(controller, home: _SharedLinkOpener()));
+    await tester.tap(find.text('Open shared link'));
+    // The fetch spinner never settles, so pump frames by hand.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    final job = SharedAudioJob.running.value.single;
+    expect(find.text('Getting the audio'), findsOneWidget);
+    expect(find.text('Finding a converter…'), findsOneWidget);
+    final upload = find.widgetWithText(FilledButton, 'Upload');
+    expect(tester.widget<FilledButton>(upload).onPressed, isNull);
+
+    // Title and category can be chosen while the audio is on its way.
+    await tester.enterText(find.byType(TextField), 'My song');
+    await tester.tap(find.text('Lo-fi'));
+    await tester.pump();
+    expect(tester.widget<FilledButton>(upload).onPressed, isNotNull);
+
+    // Upload does not wait for the download: the screen closes at once.
+    await tester.tap(upload);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(job.uploadRequested, isTrue);
+    expect(find.text('Getting the audio'), findsNothing);
+    expect(
+      find.text('The song uploads as soon as its audio is ready.'),
+      findsOneWidget,
+    );
+
+    // A converter that gives up after the screen has closed still says so.
+    job.fail('The converter did not start converting.');
+    await tester.pump();
+    expect(
+      controller.notice,
+      'A shared song could not be uploaded. '
+      'The converter did not start converting.',
+    );
+    expect(SharedAudioJob.running.value, isEmpty);
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+  });
+
+  testWidgets('a waiting upload starts once the shared audio arrives', (
+    tester,
+  ) async {
+    _usePhone(tester, const Size(1080, 2340));
+    final file = File('${Directory.systemTemp.path}/Nexmusic Waiting Song.mp3')
+      ..writeAsBytesSync(List.filled(2048, 1));
+    addTearDown(() {
+      if (file.existsSync()) file.deleteSync();
+    });
+    final controller = await _controller()
+      ..signedIn = true
+      ..categories = _categories;
+
+    await tester.pumpWidget(_app(controller, home: _SharedLinkOpener()));
+    await tester.tap(find.text('Open shared link'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    final job = SharedAudioJob.running.value.single;
+    await tester.tap(find.text('Lo-fi'));
+    await tester.pump();
+    await tester.tap(find.widgetWithText(FilledButton, 'Upload'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    job.complete(file.path);
+    await tester.pump();
+
+    // The upload was handed to the controller with its category. Test
+    // controllers have no Google account, so the controller turns it away
+    // with its sign-in notice rather than a missing-category one.
+    expect(controller.notice, 'Sign in with Google to upload.');
+    expect(SharedAudioJob.running.value, isEmpty);
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+  });
+
+  testWidgets('shared audio that arrives before Upload joins the selection', (
+    tester,
+  ) async {
+    _usePhone(tester, const Size(1080, 2340));
+    final file = File('${Directory.systemTemp.path}/Nexmusic Shared Song.mp3')
+      ..writeAsBytesSync(List.filled(2048, 1));
+    addTearDown(() {
+      if (file.existsSync()) file.deleteSync();
+    });
+    final controller = await _controller()
+      ..signedIn = true
+      ..categories = _categories;
+
+    await tester.pumpWidget(
+      _app(
+        controller,
+        home: const UploadScreen(sharedLink: 'https://youtu.be/abc'),
+      ),
+    );
+    await tester.pump();
+
+    SharedAudioJob.running.value.single.complete(file.path);
+    await tester.pumpAndSettle();
+
+    expect(find.text('1 file · 2 KB'), findsOneWidget);
+    expect(find.text('Nexmusic Shared Song'), findsOneWidget);
+    expect(SharedAudioJob.running.value, isEmpty);
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+  });
+
+  testWidgets('uploads in progress can be paused and cancelled', (
+    tester,
+  ) async {
+    _usePhone(tester, const Size(1080, 2340));
+    final controller = await _controller()
+      ..signedIn = true
+      ..categories = _categories
+      ..uploads = [
+        UploadItem(path: 'a.mp3', name: 'a.mp3', sizeBytes: 1000, title: 'A')
+          ..status = UploadStatus.uploading
+          ..progress = 0.4,
+        UploadItem(path: 'b.mp3', name: 'b.mp3', sizeBytes: 1000, title: 'B'),
+      ];
+
+    await tester.pumpWidget(_app(controller, home: const UploadScreen()));
+    await tester.pumpAndSettle();
+    expect(find.text('Uploading'), findsOneWidget);
+
+    await tester.tap(find.text('Pause'));
+    await tester.pumpAndSettle();
+    expect(controller.uploadsPaused, isTrue);
+    expect(find.text('Uploads paused'), findsOneWidget);
+    expect(find.text('Resume'), findsOneWidget);
+
+    // Cancelling asks first, then stops the songs not yet sent.
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.text('Stop uploading?'), findsOneWidget);
+    await tester.tap(find.text('Stop'));
+    await tester.pumpAndSettle();
+    expect(controller.uploads.last.status, UploadStatus.cancelled);
+    expect(controller.uploadsPaused, isFalse);
+    expect(find.textContaining('Cancelled'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
     await tester.pumpWidget(const SizedBox.shrink());

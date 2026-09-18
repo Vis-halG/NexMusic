@@ -297,6 +297,9 @@ class NexMusicApp extends StatelessWidget {
       darkTheme: theme(Brightness.dark),
       themeMode: appState.dark ? ThemeMode.dark : ThemeMode.light,
       scrollBehavior: const NexMusicScrollBehavior(),
+      // Browsers turning shared links into audio run behind every page.
+      builder: (context, child) =>
+          SharedAudioHost(child: child ?? const SizedBox.shrink()),
       home: appState.signedIn ? const MusicShell() : const WelcomeScreen(),
     );
   }

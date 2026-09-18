@@ -49,6 +49,7 @@ dependencies:
   video_player: ^2.14.0
   firebase_messaging: ^16.6.0
   audio_service: ^0.18.19
+  pointycastle: ^4.0.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

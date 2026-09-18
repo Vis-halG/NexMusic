@@ -1,0 +1,314 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:nex_music/music_data.dart';
+import 'package:nex_music/music_provider.dart';
+
+void main() {
+  group('JioSaavnProvider', () {
+    test('maps search metadata without exposing a stream URL', () async {
+      late Uri requested;
+      final provider = JioSaavnProvider(
+        fetchJson: (uri) async {
+          requested = uri;
+          return {
+            'results': [
+              {
+                'id': 'track-1',
+                'title': 'Rock &amp; Roll',
+                'image': 'https://img.example/150x150.jpg',
+                'more_info': {
+                  'duration': '123',
+                  'artistMap': {
+                    'primary_artists': [
+                      {'name': 'A &amp; B'},
+                    ],
+                  },
+                },
+              },
+            ],
+          };
+        },
+      );
+
+      final results = await provider.searchSongs('test query');
+
+      expect(requested.queryParameters['__call'], 'search.getResults');
+      expect(requested.queryParameters['q'], 'test query');
+      expect(results, hasLength(1));
+      expect(results.single.id, 'provider:jiosaavn:track-1');
+      expect(results.single.title, 'Rock & Roll');
+      expect(results.single.artist, 'A & B');
+      expect(results.single.artworkUrl, contains('500x500'));
+      expect(results.single.durationMs, 123000);
+      expect(results.single.url, isEmpty);
+      expect(results.single.isProvider, isTrue);
+    });
+
+    test('resolves the encrypted URL and selects high quality', () async {
+      final provider = JioSaavnProvider(
+        fetchJson: (_) async => {
+          'songs': [
+            {
+              'more_info': {
+                'encrypted_media_url':
+                    'ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDySan+n+AW12BvOaQj7cuGfg8Ed085rYUtqDj8DQY3nIMQdr42ScGdtRw7tS9a8Gtq',
+                '320kbps': 'true',
+              },
+            },
+          ],
+        },
+      );
+      // Use a direct provider item because this fetcher serves the details
+      // endpoint in this test.
+      const providerSong = _ProviderSong.song;
+
+      expect(
+        await provider.resolveStreamUrl(providerSong),
+        'https://aac.saavncdn.com/450/f467e05e2825cec2203546333e0d0550_320.mp4',
+      );
+    });
+  });
+
+  group('YouTubeMusicProvider', () {
+    test('maps track search results', () async {
+      late Uri requested;
+      late Map<String, dynamic> requestBody;
+      final provider = YouTubeMusicProvider(
+        postJson: (uri, body, headers) async {
+          requested = uri;
+          requestBody = body;
+          expect(headers['Origin'], 'https://music.youtube.com');
+          return {
+            'contents': {
+              'sectionListRenderer': {
+                'contents': [
+                  {
+                    'musicShelfRenderer': {
+                      'contents': [
+                        {
+                          'musicResponsiveListItemRenderer': {
+                            'thumbnail': {
+                              'musicThumbnailRenderer': {
+                                'thumbnail': {
+                                  'thumbnails': [
+                                    {
+                                      'url': 'https://img.example/120.jpg',
+                                      'width': 120,
+                                    },
+                                    {
+                                      'url': 'https://img.example/500.jpg',
+                                      'width': 500,
+                                    },
+                                  ],
+                                },
+                              },
+                            },
+                            'overlay': {
+                              'watchEndpoint': {'videoId': 'video-1'},
+                            },
+                            'flexColumns': [
+                              {
+                                'musicResponsiveListItemFlexColumnRenderer': {
+                                  'text': {
+                                    'runs': [
+                                      {'text': 'Test Track'},
+                                    ],
+                                  },
+                                },
+                              },
+                              {
+                                'musicResponsiveListItemFlexColumnRenderer': {
+                                  'text': {
+                                    'runs': [
+                                      {
+                                        'text': 'Singer One',
+                                        'navigationEndpoint': {
+                                          'browseEndpoint': {
+                                            'browseId': 'UC-singer',
+                                          },
+                                        },
+                                      },
+                                      {'text': ' • '},
+                                      {'text': '3:45'},
+                                    ],
+                                  },
+                                },
+                              },
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+          };
+        },
+      );
+
+      final results = await provider.searchSongs('test track');
+
+      expect(requested.path, contains('/youtubei/v1/search'));
+      expect(requestBody['query'], 'test track');
+      expect(results, hasLength(1));
+      expect(results.single.id, 'provider:ytmusic:video-1');
+      expect(results.single.artist, 'Singer One');
+      expect(results.single.artworkUrl, endsWith('/500.jpg'));
+      expect(results.single.durationMs, 225000);
+    });
+
+    test('selects the highest bitrate direct audio stream', () async {
+      final provider = YouTubeMusicProvider(
+        postJson: (uri, body, headers) async {
+          expect(uri.path, contains('/youtubei/v1/player'));
+          expect(body['videoId'], 'video-1');
+          expect(headers['X-YouTube-Client-Name'], '5');
+          return {
+            'playabilityStatus': {'status': 'OK'},
+            'streamingData': {
+              'adaptiveFormats': [
+                {
+                  'mimeType': 'video/mp4',
+                  'bitrate': 500000,
+                  'url': 'https://media.example/video.mp4',
+                },
+                {
+                  'mimeType': 'audio/mp4; codecs="mp4a.40.5"',
+                  'bitrate': 50000,
+                  'url': 'https://media.example/low.m4a',
+                },
+                {
+                  'mimeType': 'audio/mp4; codecs="mp4a.40.2"',
+                  'bitrate': 130000,
+                  'url': 'https://media.example/high.m4a',
+                },
+              ],
+            },
+          };
+        },
+      );
+
+      expect(
+        await provider.resolveStreamUrl(_ProviderSong.youtubeSong),
+        'https://media.example/high.m4a',
+      );
+    });
+  });
+
+  group('YouTubeVideoProvider', () {
+    test('maps standard YouTube video results', () async {
+      final provider = YouTubeVideoProvider(
+        postJson: (uri, body, headers) async => {
+          'contents': {
+            'twoColumnSearchResultsRenderer': {
+              'primaryContents': {
+                'sectionListRenderer': {
+                  'contents': [
+                    {
+                      'itemSectionRenderer': {
+                        'contents': [
+                          {
+                            'videoRenderer': {
+                              'videoId': 'video-2',
+                              'title': {
+                                'runs': [
+                                  {'text': 'Official Music Video'},
+                                ],
+                              },
+                              'ownerText': {
+                                'runs': [
+                                  {'text': 'Official Artist'},
+                                ],
+                              },
+                              'lengthText': {'simpleText': '4:10'},
+                              'thumbnail': {
+                                'thumbnails': [
+                                  {
+                                    'url': 'https://img.example/video.jpg',
+                                    'width': 720,
+                                  },
+                                ],
+                              },
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      );
+
+      final results = await provider.searchSongs('official video');
+
+      expect(results, hasLength(1));
+      expect(results.single.id, 'provider:ytvideo:video-2');
+      expect(results.single.kind, 'video');
+      expect(results.single.artist, 'Official Artist');
+      expect(results.single.durationMs, 250000);
+    });
+
+    test('selects a muxed MP4 video-with-audio stream', () async {
+      final provider = YouTubeVideoProvider(
+        postJson: (uri, body, headers) async => {
+          'playabilityStatus': {'status': 'OK'},
+          'streamingData': {
+            'formats': [
+              {
+                'mimeType': 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+                'bitrate': 440000,
+                'url': 'https://media.example/video-with-audio.mp4',
+              },
+            ],
+          },
+        },
+      );
+
+      expect(
+        await provider.resolveStreamUrl(_ProviderSong.youtubeVideo),
+        'https://media.example/video-with-audio.mp4',
+      );
+    });
+  });
+
+  test('provider songs survive local JSON serialization with an empty URL', () {
+    const original = _ProviderSong.song;
+    final copy = Song.fromJson(original.toJson());
+
+    expect(copy, isNotNull);
+    expect(copy!.providerId, 'jiosaavn');
+    expect(copy.sourceId, 'track-1');
+  });
+}
+
+abstract final class _ProviderSong {
+  static const song = Song(
+    id: 'provider:jiosaavn:track-1',
+    title: 'Song',
+    kind: 'audio',
+    url: '',
+    providerId: 'jiosaavn',
+    sourceId: 'track-1',
+  );
+
+  static const youtubeSong = Song(
+    id: 'provider:ytmusic:video-1',
+    title: 'Test Track',
+    kind: 'audio',
+    url: '',
+    providerId: 'ytmusic',
+    sourceId: 'video-1',
+  );
+
+  static const youtubeVideo = Song(
+    id: 'provider:ytvideo:video-2',
+    title: 'Official Music Video',
+    kind: 'video',
+    url: '',
+    providerId: 'ytvideo',
+    sourceId: 'video-2',
+  );
+}

@@ -50,7 +50,11 @@ file stays on Cloudinary until it is removed from the Media Library.
   - WMA is not accepted because Cloudinary does not take it.
 - Multi-select upload: pick many files, choose one category, upload three at a
   time with per-file progress, retry for failures, and skipping of files that
-  are already in the catalogue (same title and size). On Android the chooser
+  are already in the catalogue (same title and size). A running batch can be
+  paused, resumed or cancelled from the upload screen; a song that was halfway
+  starts again from the beginning on resume, because Cloudinary takes each
+  file in one request, and a song already sent to Cloudinary is left to finish
+  so it is never stranded without its catalogue entry. On Android the chooser
   only keeps a link to each file; a file is copied into the cache just while
   it uploads, so choosing hundreds of songs does not fill the phone.
 - A category must be picked before uploading. Anyone signed in can later
@@ -81,9 +85,31 @@ file stays on Cloudinary until it is removed from the Media Library.
 - Any song or video can be downloaded from its ⋮ menu and then plays from the
   phone without internet (Profile → Downloads). A download is removed when
   its uploader deletes the song.
-- Sharing a YouTube link to nexMusic copies the link and opens the in-app
-  browser on a "youtube to mp3" search; other shared links open the "Save
-  link" screen. nexMusic never contacts YouTube itself.
+- Sharing a YouTube link to nexMusic opens the upload screen straight away.
+  Out of sight behind the app, the in-app browser searches "youtube to mp3",
+  opens the top ordinary result (Google's adverts are skipped) and walks the
+  converter through Paste, Convert and Download, while the upload screen shows
+  how far it has got. The title and category can be chosen meanwhile, and
+  pressing Upload returns to the home screen at once: the hidden browser's
+  progress ("Converting…", "Downloading 40%") shows where upload progress
+  does, and the song uploads the moment its audio arrives, waiting its turn if
+  another batch is still uploading. If the audio cannot be fetched after the
+  screen has closed, a message says so. Leaving without pressing Upload stops
+  the hidden browser. Each step is tried a few times, and the whole fetch gives up
+  after three minutes; the upload screen then offers "Try again", or "Open
+  browser" to finish the converter by hand. The hidden browser fills the
+  screen underneath the app's pages, because converter pages only lay out
+  their buttons at a real size. It presses the site's own buttons, trying
+  several labels ("Convert", "Start", "Go", "OK", …). Reading the page only
+  ever carries a step from Converting to Download, and a file is fetched once
+  per page. Links that would take the page off the converter's own domain are
+  blocked, because adverts on these sites wear the same words as the real
+  button; if the file has just been asked for, the download is asked for
+  again. This only works as well as the site does: some converters answer
+  every download press with an advert (ytmp3.cc did when this was written),
+  so no file arrives from them. The browser has no back, forward or shortcut
+  buttons. Other shared links open the "Save link" screen. nexMusic never
+  contacts YouTube itself.
 - A song or video downloaded inside the in-app browser is saved to the app
   cache and opens the upload screen with the file ready; a category still has
   to be chosen. Direct file links are captured; downloads a page builds in

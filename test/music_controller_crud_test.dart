@@ -168,14 +168,10 @@ void main() {
     final controller = MusicController(await SharedPreferences.getInstance());
     addTearDown(controller.dispose);
 
-    UploadItem item(UploadStatus status, {double progress = 0}) => UploadItem(
-      path: 'a.mp3',
-      name: 'a.mp3',
-      sizeBytes: 1000,
-      title: 'A',
-    )
-      ..status = status
-      ..progress = progress;
+    UploadItem item(UploadStatus status, {double progress = 0}) =>
+        UploadItem(path: 'a.mp3', name: 'a.mp3', sizeBytes: 1000, title: 'A')
+          ..status = status
+          ..progress = progress;
 
     controller.uploads = [
       item(UploadStatus.done),
@@ -275,7 +271,10 @@ void main() {
     );
     expect(categoryRenameActivity('Old', 'Retro').body, 'Old → Retro');
     expect(categoryDeleteActivity('Old').body, 'Old');
-    expect(categoryDeleteActivity('Old', songs: 1).body, 'Old · 1 song removed');
+    expect(
+      categoryDeleteActivity('Old', songs: 1).body,
+      'Old · 1 song removed',
+    );
     expect(
       categoryDeleteActivity('Old', songs: 12).body,
       'Old · 12 songs removed',
@@ -284,7 +283,10 @@ void main() {
 
   test('streaming links are refused before they reach a player', () async {
     expect(isStreamingLink('https://cdn.example.com/live/index.m3u8'), isTrue);
-    expect(isStreamingLink('https://cdn.example.com/a/Manifest.MPD?t=1'), isTrue);
+    expect(
+      isStreamingLink('https://cdn.example.com/a/Manifest.MPD?t=1'),
+      isTrue,
+    );
     expect(isStreamingLink('https://example.com/video.ism/Manifest'), isTrue);
     expect(isStreamingLink('rtsp://camera.local/stream'), isTrue);
     expect(

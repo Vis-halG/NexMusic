@@ -34,6 +34,10 @@ migrate_working_dir/
 /coverage/
 /tool/small_apk/node_modules/
 
+# Build artifacts kept outside /build/, like the APK shared for testing
+*.apk
+*.aab
+
 # Symbolication related
 app.*.symbols
 

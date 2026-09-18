@@ -183,8 +183,11 @@ class PhoneServices {
   });
 
   /// Replaces a progress notification with a finished one.
-  Future<void> showDone(int id, {required String title, required String text}) =>
-      _call<void>('showDone', {'id': id, 'title': title, 'text': text});
+  Future<void> showDone(
+    int id, {
+    required String title,
+    required String text,
+  }) => _call<void>('showDone', {'id': id, 'title': title, 'text': text});
 
   Future<void> showActivity(String title, String body) => _call<void>(
     'showActivity',
@@ -271,7 +274,10 @@ class PhoneServices {
         final notification = message.notification;
         if (notification == null) return;
         unawaited(
-          showActivity(notification.title ?? 'nexMusic', notification.body ?? ''),
+          showActivity(
+            notification.title ?? 'nexMusic',
+            notification.body ?? '',
+          ),
         );
       });
     } catch (error) {
