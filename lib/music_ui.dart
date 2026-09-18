@@ -685,16 +685,12 @@ class MusicShell extends StatefulWidget {
 class _MusicShellState extends State<MusicShell> {
   StreamSubscription<List<SharedMediaFile>>? _shareSubscription;
   StreamSubscription<String>? _launchSubscription;
-  StreamSubscription<String>? _outputSubscription;
 
   @override
   void initState() {
     super.initState();
     if (kIsWeb) return;
-    final music = context.read<MusicController>();
-    _outputSubscription = music.simpleOutputFiles.listen(_openOutput);
-    unawaited(music.watchSimpleOutput());
-    final phone = music.phone;
+    final phone = context.read<MusicController>().phone;
     _launchSubscription = phone?.launchActions.listen(_runLaunchAction);
     phone?.takeLaunchAction().then((action) {
       if (action != null) _runLaunchAction(action);
@@ -708,8 +704,6 @@ class _MusicShellState extends State<MusicShell> {
     }, onError: (Object _) {});
   }
 
-  /// Shared files open the upload screen. A shared link or text is saved in
-  /// simpleinput for another tool.
   void _openSharedItems(List<SharedMediaFile> items) {
     if (!mounted || items.isEmpty) return;
     final media = [
@@ -718,28 +712,50 @@ class _MusicShellState extends State<MusicShell> {
             item.type == SharedMediaType.file)
           item.path,
     ];
-    if (media.isEmpty) {
-      for (final item in items) {
-        unawaited(
-          context.read<MusicController>().saveToSimpleInput(item.path),
-        );
-      }
-      return;
-    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _push(context, UploadScreen(initialPaths: media));
-    });
-  }
-
-  /// Opens the upload screen with an audio file another tool left in
-  /// simpleoutput.
-  void _openOutput(String filePath) {
-    if (!mounted) return;
-    if (UploadScreen.isActive) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && !UploadScreen.isActive) {
-        _push(context, UploadScreen(initialPaths: [filePath]));
+      if (!mounted) return;
+      if (media.isEmpty) {
+        final youtube = youtubeLinkIn(items.first.path);
+        if (youtube != null && _webViewSupported) {
+          unawaited(_openConverterSearch(youtube));
+        } else {
+          _push(context, SharedImportScreen(source: items.first.path));
+        }
+        return;
       }
+      _sheet(
+        context,
+        title: media.length == 1
+            ? 'Add shared file'
+            : 'Add ${media.length} shared files',
+        (sheetContext) => [
+          ListTile(
+            leading: const Icon(Icons.public_rounded),
+            title: const Text('Upload for everyone'),
+            subtitle: const Text('Choose a category and share it'),
+            onTap: () {
+              Navigator.pop(sheetContext);
+              _push(context, UploadScreen(initialPaths: media));
+            },
+          ),
+          if (media.length == 1)
+            ListTile(
+              leading: const Icon(Icons.lock_outline_rounded),
+              title: const Text('Keep privately'),
+              subtitle: const Text('Trim it or save the original for yourself'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                _push(
+                  context,
+                  OwnedMediaEditorScreen(
+                    source: media.first,
+                    suggestedName: _fileName(media.first),
+                  ),
+                );
+              },
+            ),
+        ],
+      );
     });
   }
 
@@ -788,11 +804,23 @@ class _MusicShellState extends State<MusicShell> {
     });
   }
 
+  /// Copies a shared YouTube link and opens the in-app browser on a
+  /// "youtube to mp3" search, so the link can be pasted on the site chosen.
+  Future<void> _openConverterSearch(String link) async {
+    await Clipboard.setData(ClipboardData(text: link));
+    if (!mounted) return;
+    _push(context, const NexBrowserScreen(sharedLink: 'youtube to mp3'));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('YouTube link copied. Paste it on the site you open.'),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _shareSubscription?.cancel();
     _launchSubscription?.cancel();
-    _outputSubscription?.cancel();
     super.dispose();
   }
 
@@ -1347,9 +1375,6 @@ class UploadScreen extends StatefulWidget {
   const UploadScreen({super.key, this.initialPaths = const []});
   final List<String> initialPaths;
 
-  /// Tracks if an UploadScreen is currently active in the navigation stack.
-  static bool isActive = false;
-
   @override
   State<UploadScreen> createState() => _UploadScreenState();
 }
@@ -1361,12 +1386,10 @@ class _UploadScreenState extends State<UploadScreen> {
   final List<String> _rejected = [];
   String? _categoryId;
   bool _rights = false;
-  StreamSubscription<String>? _outputSub;
 
   @override
   void initState() {
     super.initState();
-    UploadScreen.isActive = true;
     _music = context.read<MusicController>();
     for (final filePath in widget.initialPaths) {
       final file = File(filePath);
@@ -1377,27 +1400,10 @@ class _UploadScreenState extends State<UploadScreen> {
       );
     }
     if (_picked.length == 1) _title.text = _picked.first.title;
-
-    _outputSub = _music.simpleOutputFiles.listen((filePath) {
-      if (!mounted) return;
-      final file = File(filePath);
-      setState(() {
-        _add(
-          filePath,
-          _fileName(filePath),
-          !kIsWeb && file.existsSync() ? file.lengthSync() : 0,
-        );
-        if (_picked.length == 1 && _title.text.isEmpty) {
-          _title.text = _picked.first.title;
-        }
-      });
-    });
   }
 
   @override
   void dispose() {
-    UploadScreen.isActive = false;
-    _outputSub?.cancel();
     // Picked files that were never uploaded leave copies in the cache. Clear
     // them only when no upload batch still needs its files.
     if (_picked.isNotEmpty && _music.uploads.isEmpty) {

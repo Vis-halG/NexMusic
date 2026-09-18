@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nex_music/music_controller.dart';
 import 'package:nex_music/music_data.dart';
@@ -250,39 +248,6 @@ void main() {
     );
     expect(youtubeLinkIn('https://example.com/youtube.com'), isNull);
     expect(youtubeLinkIn('no link here'), isNull);
-  });
-
-  test('shared links go to simpleinput and finished audio is picked up', () async {
-    final base = await Directory.systemTemp.createTemp('nexmusic_handoff');
-    addTearDown(() => base.delete(recursive: true));
-
-    final input = Directory('${base.path}/simpleinput');
-    final link = await saveLinkIn(
-      input,
-      'Listen https://youtu.be/abc123?si=x, now',
-    );
-    expect(
-      await link.readAsString(),
-      'Listen https://youtu.be/abc123?si=x, now\n',
-    );
-    final text = await saveLinkIn(input, '  Tum Hi Ho Arijit Singh ');
-    expect(await text.readAsString(), 'Tum Hi Ho Arijit Singh\n');
-
-    final output = Directory('${base.path}/simpleoutput')..createSync();
-    final sizes = <String, int>{};
-    final song = File('${output.path}/Song.mp3')..writeAsBytesSync([1, 2, 3]);
-    File('${output.path}/notes.txt').writeAsStringSync('not audio');
-    // A file counts once its size stays the same between two looks.
-    expect(finishedAudioFiles(output, sizes), isEmpty);
-    song.writeAsBytesSync([4], mode: FileMode.append);
-    expect(finishedAudioFiles(output, sizes), isEmpty);
-    expect(
-      finishedAudioFiles(
-        output,
-        sizes,
-      ).map((file) => file.path.split(RegExp(r'[\\/]')).last),
-      ['Song.mp3'],
-    );
   });
 
   test('activity notifications describe changes without names', () {
