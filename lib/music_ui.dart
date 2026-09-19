@@ -1093,12 +1093,33 @@ class _MusicShellState extends State<MusicShell> {
     return Scaffold(
       body: const SafeArea(bottom: false, child: _CatalogView()),
       floatingActionButton: FloatingActionButton(
-        tooltip: 'Upload',
-        onPressed: () => _push(context, const UploadScreen()),
-        child: const Icon(Icons.add_rounded),
+        tooltip: 'Play random',
+        onPressed: () => _playRandomSong(context),
+        child: const Icon(Icons.shuffle_rounded),
       ),
       bottomNavigationBar: const MiniPlayer(),
     );
+  }
+
+  void _playRandomSong(BuildContext context) {
+    final music = context.read<MusicController>();
+    List<Song> pool = const [];
+    if (music.providerSongs.isNotEmpty) {
+      pool = music.providerSongs.where((s) => !s.isVideo).toList();
+    }
+    if (pool.isEmpty) {
+      pool = music.songs.where((s) => !s.isVideo).toList();
+    }
+    if (pool.isEmpty) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('No songs available to play right now')),
+        );
+      return;
+    }
+    final randomSong = pool[math.Random().nextInt(pool.length)];
+    _openSong(context, randomSong, queue: pool);
   }
 }
 
@@ -1316,6 +1337,11 @@ class _CatalogViewState extends State<_CatalogView> {
               letterSpacing: -0.4,
             ),
           ),
+        ),
+        IconButton(
+          tooltip: 'Upload song',
+          onPressed: () => _push(context, const UploadScreen()),
+          icon: const Icon(Icons.add_rounded),
         ),
         IconButton(
           tooltip: 'Search',
