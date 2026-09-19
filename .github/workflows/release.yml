@@ -50,8 +50,17 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
+      - name: Configure Keystore
+        run: |
+          cat << 'EOF' > android/key.properties
+          storePassword=nexmusic123
+          keyPassword=nexmusic123
+          keyAlias=nexmusic
+          storeFile=nexmusic-release.jks
+          EOF
+
       - name: Build Android APK
-        run: flutter build apk --release
+        run: flutter build apk --release --target-platform android-arm64
 
       - name: Prepare release assets
         run: |

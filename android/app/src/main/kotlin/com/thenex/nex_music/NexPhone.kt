@@ -72,7 +72,9 @@ object NexPhone {
             "showDone" -> notify(context, call, TRANSFERS_CHANNEL, ongoing = false)
             "showActivity" -> notify(context, call, ACTIVITY_CHANNEL, ongoing = false)
             "cancel" -> manager(context).cancel(call.argument<Int>("id") ?: 0)
-            "updateWidgets" -> NexWidgets.save(context, call.argument<String>("data") ?: "{}")
+            "updateWidgets" -> {
+                // Home screen widgets removed
+            }
             "setSessionActive" -> sessionActive = call.argument<Boolean>("active") == true
             "releaseUri" -> releaseUri(context, call.argument<String>("uri"))
             "copyToCache" -> {
