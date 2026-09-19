@@ -79,6 +79,45 @@ object NexPhone {
                 copyInBackground(context, call.argument<String>("uri"), call.argument<String>("name"), result)
                 return
             }
+            "installApk" -> {
+                val path = call.argument<String>("path")
+                if (path.isNullOrEmpty()) {
+                    result.error("INVALID_PATH", "APK path is empty", null)
+                    return
+                }
+                try {
+                    val file = File(path)
+                    val authority = "${context.packageName}.fileprovider"
+                    val contentUri = androidx.core.content.FileProvider.getUriForFile(context, authority, file)
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(contentUri, "application/vnd.android.package-archive")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                    result.success(true)
+                } catch (e: Exception) {
+                    result.error("INSTALL_ERROR", e.localizedMessage, null)
+                }
+                return
+            }
+            "openUrl" -> {
+                val url = call.argument<String>("url")
+                if (url.isNullOrEmpty()) {
+                    result.error("INVALID_URL", "URL is empty", null)
+                    return
+                }
+                try {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                    result.success(true)
+                } catch (e: Exception) {
+                    result.error("OPEN_URL_ERROR", e.localizedMessage, null)
+                }
+                return
+            }
             else -> {
                 result.notImplemented()
                 return

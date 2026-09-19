@@ -13,6 +13,7 @@ import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:video_player/video_player.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import 'app_update.dart';
 import 'main.dart';
 import 'music_controller.dart';
 import 'music_data.dart';
@@ -140,6 +141,213 @@ Future<void> _sheet(
       ),
     ),
   );
+}
+
+void _showUpdateSheet(BuildContext context, AppUpdateInfo info) {
+  showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (sheetContext) => _UpdateSheet(info: info),
+  );
+}
+
+class _UpdateSheet extends StatefulWidget {
+  const _UpdateSheet({required this.info});
+  final AppUpdateInfo info;
+
+  @override
+  State<_UpdateSheet> createState() => _UpdateSheetState();
+}
+
+class _UpdateSheetState extends State<_UpdateSheet> {
+  bool _downloading = false;
+  double _fraction = 0.0;
+  String? _error;
+
+  Future<void> _startUpdate() async {
+    setState(() {
+      _downloading = true;
+      _fraction = 0.0;
+      _error = null;
+    });
+    final phone = context.read<MusicController>().phone;
+    final service = AppUpdateService();
+    final file = await service.downloadApk(
+      widget.info,
+      onProgress: (progress) {
+        if (mounted) setState(() => _fraction = progress);
+      },
+    );
+    if (!mounted) return;
+    if (file == null) {
+      setState(() {
+        _downloading = false;
+        _error = 'Download failed. Tap to try again or open in browser.';
+      });
+      return;
+    }
+    setState(() => _downloading = false);
+    final installed = await service.installUpdate(file, phone);
+    if (!installed && mounted) {
+      await phone?.openUrl(widget.info.downloadUrl);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final mutedColor = _muted(context);
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: NexMusicApp.violet.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(
+                    Icons.rocket_launch_rounded,
+                    color: NexMusicApp.violet,
+                    size: 24,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Update Available',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '${widget.info.displayVersion}${widget.info.formattedSize.isNotEmpty ? ' · ${widget.info.formattedSize}' : ''}',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: mutedColor,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (widget.info.releaseNotes.isNotEmpty) ...[
+              Text(
+                "What's new:",
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: mutedColor,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Container(
+                width: double.infinity,
+                constraints: const BoxConstraints(maxHeight: 140),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: theme.brightness == Brightness.dark
+                      ? Colors.white.withValues(alpha: 0.05)
+                      : Colors.black.withValues(alpha: 0.05),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: SingleChildScrollView(
+                  child: Text(
+                    widget.info.releaseNotes,
+                    style: const TextStyle(fontSize: 13, height: 1.4),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+            if (_error != null) ...[
+              Text(
+                _error!,
+                style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+              ),
+              const SizedBox(height: 12),
+            ],
+            if (_downloading) ...[
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Downloading update…',
+                    style: TextStyle(fontSize: 13, color: mutedColor),
+                  ),
+                  Text(
+                    '${(_fraction * 100).round()}%',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: NexMusicApp.violet,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  value: _fraction > 0 ? _fraction : null,
+                  minHeight: 6,
+                  color: NexMusicApp.violet,
+                  backgroundColor: NexMusicApp.violet.withValues(alpha: 0.15),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ] else ...[
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: FilledButton.icon(
+                  onPressed: _startUpdate,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: NexMusicApp.violet,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  icon: const Icon(Icons.download_rounded),
+                  label: const Text(
+                    'Update Now',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Center(
+                child: TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: Text(
+                    'Later',
+                    style: TextStyle(color: mutedColor),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 Future<String?> _nameDialog(
@@ -743,6 +951,19 @@ class _MusicShellState extends State<MusicShell> {
       _openSharedItems(items);
       ReceiveSharingIntent.instance.reset();
     }, onError: (Object _) {});
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkAutoUpdate();
+    });
+  }
+
+  Future<void> _checkAutoUpdate() async {
+    if (!mounted || kIsWeb) return;
+    try {
+      final update = await AppUpdateService().checkForUpdate();
+      if (update != null && mounted) {
+        _showUpdateSheet(context, update);
+      }
+    } catch (_) {}
   }
 
   void _openSharedItems(List<SharedMediaFile> items) {
@@ -3374,6 +3595,13 @@ class ProfileScreen extends StatelessWidget {
             value: music.darkMode,
             onChanged: music.setDarkMode,
           ),
+          if (!kIsWeb)
+            _NavRow(
+              icon: Icons.system_update_rounded,
+              title: 'Check for updates',
+              trailing: 'v$currentAppVersion',
+              onTap: () => _manualCheckAppUpdate(context),
+            ),
           _NavRow(
             icon: Icons.logout_rounded,
             title: 'Sign out',
@@ -3391,6 +3619,39 @@ class ProfileScreen extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+Future<void> _manualCheckAppUpdate(BuildContext context) async {
+  final scaffold = ScaffoldMessenger.of(context);
+  scaffold.showSnackBar(
+    const SnackBar(
+      content: Text('Checking for updates…'),
+      duration: Duration(seconds: 1),
+    ),
+  );
+  try {
+    final update = await AppUpdateService().checkForUpdate();
+    if (!context.mounted) return;
+    scaffold.hideCurrentSnackBar();
+    if (update != null) {
+      _showUpdateSheet(context, update);
+    } else {
+      scaffold.showSnackBar(
+        const SnackBar(
+          content: Text('NexMusic is up to date!'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+  } catch (error) {
+    if (!context.mounted) return;
+    scaffold.hideCurrentSnackBar();
+    scaffold.showSnackBar(
+      const SnackBar(
+        content: Text('Could not check for updates. Check connection.'),
       ),
     );
   }

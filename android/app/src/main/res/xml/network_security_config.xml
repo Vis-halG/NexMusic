@@ -3,5 +3,6 @@
     <!-- just_audio's local proxy attaches provider-specific request headers. -->
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
     </domain-config>
 </network-security-config>

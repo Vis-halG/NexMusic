@@ -202,6 +202,18 @@ class PhoneServices {
   Future<void> setSessionActive(bool active) =>
       _call<void>('setSessionActive', {'active': active});
 
+  /// Launches Android's system package installer for the APK at [filePath].
+  Future<bool> installApk(String filePath) async {
+    final success = await _call<bool>('installApk', {'path': filePath});
+    return success ?? false;
+  }
+
+  /// Opens an external URL in the system browser.
+  Future<bool> openUrl(String url) async {
+    final success = await _call<bool>('openUrl', {'url': url});
+    return success ?? false;
+  }
+
   /// Opens Android's chooser for any number of audio and video files. It
   /// returns content URIs with names and sizes and copies nothing, so a big
   /// batch cannot fill the phone. Null when the native chooser is missing.

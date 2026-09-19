@@ -931,7 +931,8 @@ class MusicController extends ChangeNotifier {
       unawaited(_audio.play());
     } on PlayerInterruptedException {
       // A newer play() call replaced this one.
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('Playback failed for "${song.title}": $e\n$st');
       loading = false;
       notice = 'Could not load the audio. Check your internet connection.';
       notifyListeners();
