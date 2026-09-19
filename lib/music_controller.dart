@@ -608,6 +608,33 @@ class MusicController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> loadProviderHome(String providerId) async {
+    final provider = _providerById(providerId);
+    if (provider == null) return;
+    final request = ++_providerRequest;
+    activeProviderId = providerId;
+    providerQuery = '';
+    providerSongs = const [];
+    providerError = null;
+    providerLoading = true;
+    notifyListeners();
+    try {
+      final results = await provider.loadFeatured();
+      if (request != _providerRequest) return;
+      providerSongs = results;
+    } catch (_) {
+      if (request != _providerRequest) return;
+      providerSongs = const [];
+      providerError =
+          'Could not load ${provider.displayName}. Check your connection.';
+    } finally {
+      if (request == _providerRequest) {
+        providerLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
   Future<void> searchProvider(String query, {String? providerId}) async {
     final targetId = providerId ?? activeProviderId;
     final provider = _providerById(targetId);
@@ -685,6 +712,9 @@ class MusicController extends ChangeNotifier {
     }
     return provider.resolveStreamUrl(song);
   }
+
+  Map<String, String> playbackHeadersFor(Song song) =>
+      _providerById(song.providerId)?.playbackHeaders(song) ?? const {};
 
   @override
   void notifyListeners() {
@@ -892,7 +922,11 @@ class MusicController extends ChangeNotifier {
     _audioHandler?.mediaItem.add(_mediaItem(song));
     unawaited(phone?.setSessionActive(true));
     try {
-      await _audio.setUrl(await resolvedPlayableUrl(song));
+      final url = await resolvedPlayableUrl(song);
+      final headers = playbackHeadersFor(song);
+      // just_audio sends custom headers through its local 127.0.0.1 proxy,
+      // which network_security_config.xml allows over cleartext.
+      await _audio.setUrl(url, headers: headers.isEmpty ? null : headers);
       // play() only completes when playback stops, so it is not awaited.
       unawaited(_audio.play());
     } on PlayerInterruptedException {
@@ -1868,8 +1902,7 @@ class MusicController extends ChangeNotifier {
       await folder.create(recursive: true);
       final extension = path.extension(Uri.parse(sourceUrl).path).toLowerCase();
       final defaultExtension = switch (song.providerId) {
-        'ytmusic' => '.m4a',
-        'ytvideo' => '.mp4',
+        'ytmusic' || 'ytvideo' => '.mp4',
         _ => '.mp3',
       };
       final safeId = song.id.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
@@ -1880,6 +1913,9 @@ class MusicController extends ChangeNotifier {
         ),
       );
       final request = await client.getUrl(Uri.parse(sourceUrl));
+      for (final header in playbackHeadersFor(song).entries) {
+        request.headers.set(header.key, header.value);
+      }
       final response = await request.close().timeout(
         const Duration(minutes: 1),
       );

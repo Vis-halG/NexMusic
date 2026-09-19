@@ -4,6 +4,27 @@ import 'package:nex_music/music_provider.dart';
 
 void main() {
   group('JioSaavnProvider', () {
+    test('loads playable songs from the trending feed', () async {
+      final provider = JioSaavnProvider(
+        fetchJson: (_) async => {
+          'new_trending': [
+            {'id': 'playlist-1', 'title': 'Mix', 'type': 'playlist'},
+            {
+              'id': 'track-1',
+              'title': 'Trending Song',
+              'type': 'song',
+              'more_info': {'duration': '180', 'music': 'Singer'},
+            },
+          ],
+        },
+      );
+
+      final results = await provider.loadFeatured();
+
+      expect(results, hasLength(1));
+      expect(results.single.title, 'Trending Song');
+    });
+
     test('maps search metadata without exposing a stream URL', () async {
       late Uri requested;
       final provider = JioSaavnProvider(
@@ -66,9 +87,57 @@ void main() {
         'https://aac.saavncdn.com/450/f467e05e2825cec2203546333e0d0550_320.mp4',
       );
     });
+
+    test('does not require custom playback headers', () {
+      final provider = JioSaavnProvider();
+
+      expect(provider.playbackHeaders(_ProviderSong.song), isEmpty);
+    });
   });
 
   group('YouTubeMusicProvider', () {
+    test('loads tracks from the music home feed', () async {
+      final provider = YouTubeMusicProvider(
+        postJson: (uri, body, headers) async => {
+          'musicResponsiveListItemRenderer': {
+            'overlay': {
+              'watchEndpoint': {'videoId': 'home-track'},
+            },
+            'flexColumns': [
+              {
+                'musicResponsiveListItemFlexColumnRenderer': {
+                  'text': {
+                    'runs': [
+                      {'text': 'Home Track'},
+                    ],
+                  },
+                },
+              },
+              {
+                'musicResponsiveListItemFlexColumnRenderer': {
+                  'text': {
+                    'runs': [
+                      {
+                        'text': 'Home Artist',
+                        'navigationEndpoint': {
+                          'browseEndpoint': {'browseId': 'UC-home'},
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
+          },
+        },
+      );
+
+      final results = await provider.loadFeatured();
+
+      expect(results.single.title, 'Home Track');
+      expect(results.single.artist, 'Home Artist');
+    });
+
     test('maps track search results', () async {
       late Uri requested;
       late Map<String, dynamic> requestBody;
@@ -157,30 +226,28 @@ void main() {
       expect(results.single.durationMs, 225000);
     });
 
-    test('selects the highest bitrate direct audio stream', () async {
+    test('plays the full-length stream that carries AAC audio', () async {
       final provider = YouTubeMusicProvider(
         postJson: (uri, body, headers) async {
           expect(uri.path, contains('/youtubei/v1/player'));
           expect(body['videoId'], 'video-1');
-          expect(headers['X-YouTube-Client-Name'], '5');
+          expect(headers['X-YouTube-Client-Name'], '3');
           return {
             'playabilityStatus': {'status': 'OK'},
             'streamingData': {
+              'formats': [
+                {
+                  'mimeType': 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+                  'bitrate': 440000,
+                  'url': 'https://media.example/with-audio.mp4',
+                },
+              ],
+              // Anonymous audio-only URLs stop after the first megabyte.
               'adaptiveFormats': [
-                {
-                  'mimeType': 'video/mp4',
-                  'bitrate': 500000,
-                  'url': 'https://media.example/video.mp4',
-                },
-                {
-                  'mimeType': 'audio/mp4; codecs="mp4a.40.5"',
-                  'bitrate': 50000,
-                  'url': 'https://media.example/low.m4a',
-                },
                 {
                   'mimeType': 'audio/mp4; codecs="mp4a.40.2"',
                   'bitrate': 130000,
-                  'url': 'https://media.example/high.m4a',
+                  'url': 'https://media.example/audio-only.m4a',
                 },
               ],
             },
@@ -190,12 +257,86 @@ void main() {
 
       expect(
         await provider.resolveStreamUrl(_ProviderSong.youtubeSong),
-        'https://media.example/high.m4a',
+        'https://media.example/with-audio.mp4',
       );
+    });
+
+    test('reports why YouTube refused a track', () async {
+      final provider = YouTubeMusicProvider(
+        postJson: (uri, body, headers) async => {
+          'playabilityStatus': {
+            'status': 'UNPLAYABLE',
+            'reason': 'Video unavailable',
+          },
+        },
+      );
+
+      expect(
+        provider.resolveStreamUrl(_ProviderSong.youtubeSong),
+        throwsA(
+          isA<FormatException>().having(
+            (error) => error.message,
+            'message',
+            'Video unavailable',
+          ),
+        ),
+      );
+    });
+
+    test('streams without custom playback headers', () {
+      final provider = YouTubeMusicProvider();
+
+      expect(provider.playbackHeaders(_ProviderSong.youtubeSong), isEmpty);
     });
   });
 
   group('YouTubeVideoProvider', () {
+    test('loads videos from the browse feed', () async {
+      final provider = YouTubeVideoProvider(
+        postJson: (uri, body, headers) async => {
+          'lockupViewModel': {
+            'contentId': 'home-video',
+            'contentType': 'LOCKUP_CONTENT_TYPE_VIDEO',
+            'contentImage': {
+              'thumbnailViewModel': {
+                'image': {
+                  'sources': [
+                    {'url': 'https://img.example/home-video.jpg', 'width': 720},
+                  ],
+                },
+                'badge': {'text': '3:20'},
+              },
+            },
+            'metadata': {
+              'lockupMetadataViewModel': {
+                'title': {'content': 'Featured Video'},
+                'metadata': {
+                  'contentMetadataViewModel': {
+                    'metadataRows': [
+                      {
+                        'metadataParts': [
+                          {
+                            'text': {'content': 'Featured Artist'},
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+      );
+
+      final results = await provider.loadFeatured();
+
+      expect(results.single.title, 'Featured Video');
+      expect(results.single.artist, 'Featured Artist');
+      expect(results.single.durationMs, 200000);
+      expect(results.single.artworkUrl, endsWith('home-video.jpg'));
+    });
+
     test('maps standard YouTube video results', () async {
       final provider = YouTubeVideoProvider(
         postJson: (uri, body, headers) async => {
@@ -270,6 +411,15 @@ void main() {
       expect(
         await provider.resolveStreamUrl(_ProviderSong.youtubeVideo),
         'https://media.example/video-with-audio.mp4',
+      );
+    });
+
+    test('uses the matching Android client user agent for playback', () {
+      final provider = YouTubeVideoProvider();
+
+      expect(
+        provider.playbackHeaders(_ProviderSong.youtubeVideo)['User-Agent'],
+        contains('com.google.android.youtube'),
       );
     });
   });

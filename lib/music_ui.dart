@@ -82,7 +82,13 @@ Future<void> _openSong(
     try {
       final url = await music.resolvedPlayableUrl(song);
       if (!context.mounted) return;
-      _push(context, VideoScreen(song: song.copyWith(url: url)));
+      _push(
+        context,
+        VideoScreen(
+          song: song.copyWith(url: url),
+          httpHeaders: music.playbackHeadersFor(song),
+        ),
+      );
     } catch (_) {
       music.announce('Could not load this video. Try another result.');
     }
@@ -972,15 +978,14 @@ class _CatalogViewState extends State<_CatalogView> {
                   label: provider.name,
                   selected: providerId == provider.id,
                   onTap: () {
+                    _providerDebounce?.cancel();
+                    _search.clear();
                     music.selectProvider(provider.id);
                     setState(() {
                       _categoryId = _providerCategoryId(provider.id);
-                      _searching = true;
+                      _searching = false;
                     });
-                    final value = _search.text.trim();
-                    if (value.isNotEmpty) {
-                      music.searchProvider(value, providerId: provider.id);
-                    }
+                    unawaited(music.loadProviderHome(provider.id));
                   },
                 ),
               _Pill(
@@ -1121,13 +1126,19 @@ class _CatalogViewState extends State<_CatalogView> {
                   _providerDebounce?.cancel();
                   _providerDebounce = Timer(
                     const Duration(milliseconds: 450),
-                    () => music.searchProvider(value, providerId: providerId),
+                    () => value.trim().isEmpty
+                        ? music.loadProviderHome(providerId)
+                        : music.searchProvider(value, providerId: providerId),
                   );
                 },
                 onSubmitted: providerId != null
                     ? (value) {
                         _providerDebounce?.cancel();
-                        music.searchProvider(value, providerId: providerId);
+                        if (value.trim().isEmpty) {
+                          music.loadProviderHome(providerId);
+                        } else {
+                          music.searchProvider(value, providerId: providerId);
+                        }
                       }
                     : null,
                 decoration: InputDecoration(
@@ -1147,7 +1158,7 @@ class _CatalogViewState extends State<_CatalogView> {
                   _searching = false;
                   _search.clear();
                 });
-                if (providerId != null) music.clearProviderSearch();
+                if (providerId != null) music.loadProviderHome(providerId);
               },
               icon: const Icon(Icons.close_rounded),
             ),
@@ -1179,10 +1190,15 @@ class _CatalogViewState extends State<_CatalogView> {
     }
     return RefreshIndicator(
       onRefresh: providerSelected
-          ? () => music.searchProvider(
-              _search.text,
-              providerId: _providerIdFromCategory(_categoryId),
-            )
+          ? () {
+              final selectedProvider = _providerIdFromCategory(_categoryId)!;
+              return query.isEmpty
+                  ? music.loadProviderHome(selectedProvider)
+                  : music.searchProvider(
+                      _search.text,
+                      providerId: selectedProvider,
+                    );
+            }
           : music.refreshCatalog,
       child: visible.isEmpty
           ? ListView(
@@ -1197,14 +1213,14 @@ class _CatalogViewState extends State<_CatalogView> {
                   title: providerSelected
                       ? music.providerError ??
                             (query.isEmpty
-                                ? 'Search ${music.providerNameFor(_providerIdFromCategory(_categoryId)!)}'
+                                ? 'No recommendations right now'
                                 : 'Nothing found')
                       : query.isEmpty
                       ? 'No songs here yet'
                       : 'Nothing found',
                   subtitle: providerSelected
                       ? query.isEmpty
-                            ? 'Type a song, album, or artist name.'
+                            ? 'Pull down to refresh, or use search.'
                             : 'Pull down to try again.'
                       : query.isEmpty
                       ? 'Tap + to upload the first one.'
@@ -3067,8 +3083,13 @@ class NowPlayingScreen extends StatelessWidget {
 }
 
 class VideoScreen extends StatefulWidget {
-  const VideoScreen({super.key, required this.song});
+  const VideoScreen({
+    super.key,
+    required this.song,
+    this.httpHeaders = const {},
+  });
   final Song song;
+  final Map<String, String> httpHeaders;
 
   @override
   State<VideoScreen> createState() => _VideoScreenState();
@@ -3085,7 +3106,10 @@ class _VideoScreenState extends State<VideoScreen> {
     final url = widget.song.url;
     _video = url.startsWith('file:')
         ? VideoPlayerController.file(File.fromUri(Uri.parse(url)))
-        : VideoPlayerController.networkUrl(Uri.parse(url));
+        : VideoPlayerController.networkUrl(
+            Uri.parse(url),
+            httpHeaders: widget.httpHeaders,
+          );
     _video.addListener(_refresh);
     // Streaming formats are not bundled with the app, see isStreamingLink.
     _failed = isStreamingLink(url);

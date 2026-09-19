@@ -20,6 +20,8 @@ abstract class MusicProvider {
   String get id;
   String get displayName;
 
+  Map<String, String> playbackHeaders(Song song);
+  Future<List<Song>> loadFeatured({int limit = 20});
   Future<List<Song>> searchSongs(String query, {int limit = 20});
   Future<String> resolveStreamUrl(Song song);
 }
@@ -43,6 +45,23 @@ class JioSaavnProvider implements MusicProvider {
   String get displayName => 'JioSaavn';
 
   @override
+  Map<String, String> playbackHeaders(Song song) => const {};
+
+  @override
+  Future<List<Song>> loadFeatured({int limit = 20}) async {
+    final data = await _fetchJson(_uri({'__call': 'webapi.getLaunchData'}));
+    final items = data['new_trending'];
+    if (items is! List) return const [];
+    return items
+        .whereType<Map>()
+        .where((item) => _string(item['type']) == 'song')
+        .map((item) => _songFrom(Map<String, dynamic>.from(item)))
+        .whereType<Song>()
+        .take(limit)
+        .toList(growable: false);
+  }
+
+  @override
   Future<List<Song>> searchSongs(String query, {int limit = 20}) async {
     final value = query.trim();
     if (value.isEmpty) return const [];
@@ -61,6 +80,7 @@ class JioSaavnProvider implements MusicProvider {
         .whereType<Map>()
         .map((item) => _songFrom(Map<String, dynamic>.from(item)))
         .whereType<Song>()
+        .take(limit)
         .toList(growable: false);
   }
 
@@ -170,22 +190,18 @@ class JioSaavnProvider implements MusicProvider {
 
 /// Anonymous YouTube Music search and audio playback provider.
 ///
-/// The web music client is used for discovery and the iOS player client for a
-/// short-lived direct audio URL. URLs are deliberately resolved at play time
-/// because YouTube signs them with an expiry timestamp.
+/// The web music client is used for discovery and the Android player client
+/// for playback. URLs are deliberately resolved at play time because YouTube
+/// signs them with an expiry timestamp.
 class YouTubeMusicProvider implements MusicProvider {
   YouTubeMusicProvider({ProviderJsonPoster? postJson})
     : _postJson = postJson ?? _httpPostJson;
 
   static const _apiKey = 'AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30';
   static const _webClientVersion = '1.20260222.01.00';
-  static const _iosClientVersion = '20.10.4';
   static const _webUserAgent =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
       'AppleWebKit/537.36 Chrome/129.0.0.0 Safari/537.36';
-  static const _iosUserAgent =
-      'com.google.ios.youtube/20.10.4 '
-      '(iPhone16,2; U; CPU iOS 18_3 like Mac OS X)';
   static const _trackSearchParams = 'EgWKAQIIAWoMEA4QChADEAQQCRAF';
 
   final ProviderJsonPoster _postJson;
@@ -195,6 +211,55 @@ class YouTubeMusicProvider implements MusicProvider {
 
   @override
   String get displayName => 'YouTube Music';
+
+  @override
+  Map<String, String> playbackHeaders(Song song) => const {};
+
+  @override
+  Future<List<Song>> loadFeatured({int limit = 20}) async {
+    final data = await _postJson(
+      Uri.parse(
+        'https://music.youtube.com/youtubei/v1/browse'
+        '?alt=json&key=$_apiKey',
+      ),
+      {
+        'context': {
+          'client': {
+            'clientName': 'WEB_REMIX',
+            'clientVersion': _webClientVersion,
+            'hl': 'en',
+            'gl': 'IN',
+          },
+          'user': <String, dynamic>{},
+        },
+        'browseId': 'FEmusic_home',
+      },
+      const {
+        HttpHeaders.userAgentHeader: _webUserAgent,
+        'Origin': 'https://music.youtube.com',
+        'Referer': 'https://music.youtube.com/',
+      },
+    );
+    final responsive = <Map<String, dynamic>>[];
+    final twoRow = <Map<String, dynamic>>[];
+    _collectNamedMaps(data, 'musicResponsiveListItemRenderer', responsive);
+    _collectNamedMaps(data, 'musicTwoRowItemRenderer', twoRow);
+    final seen = <String>{};
+    final results = <Song>[];
+    for (final renderer in [...responsive, ...twoRow]) {
+      final song = renderer.containsKey('flexColumns')
+          ? _songFromRenderer(renderer)
+          : _songFromTwoRow(renderer);
+      if (song != null && seen.add(song.sourceId)) results.add(song);
+      if (results.length >= limit.clamp(1, 50)) break;
+    }
+    // Anonymous home responses sometimes contain only album/playlist cards.
+    // Fall back to a regional chart query so the browse tab still opens with
+    // immediately playable tracks rather than an empty screen.
+    return results.isEmpty
+        ? searchSongs('Top songs India', limit: limit)
+        : results;
+  }
 
   @override
   Future<List<Song>> searchSongs(String query, {int limit = 20}) async {
@@ -237,6 +302,9 @@ class YouTubeMusicProvider implements MusicProvider {
     return results;
   }
 
+  /// YouTube withholds full-length audio-only streams from anonymous clients
+  /// (reads past the first megabyte return 403 without a proof-of-origin
+  /// token), so the muxed MP4 is used and just_audio plays its AAC track.
   @override
   Future<String> resolveStreamUrl(Song song) async {
     if (song.providerId != id || song.sourceId.isEmpty) {
@@ -244,65 +312,7 @@ class YouTubeMusicProvider implements MusicProvider {
         'This song does not belong to YouTube Music.',
       );
     }
-    final data = await _postJson(
-      Uri.parse('https://www.youtube.com/youtubei/v1/player?prettyPrint=false'),
-      {
-        'context': {
-          'client': {
-            'clientName': 'IOS',
-            'clientVersion': _iosClientVersion,
-            'deviceModel': 'iPhone16,2',
-            'userAgent': _iosUserAgent,
-            'hl': 'en',
-            'gl': 'IN',
-            'utcOffsetMinutes': 330,
-          },
-        },
-        'videoId': song.sourceId,
-        'playbackContext': {
-          'contentPlaybackContext': {'html5Preference': 'HTML5_PREF_WANTS'},
-        },
-        'contentCheckOk': true,
-        'racyCheckOk': true,
-      },
-      const {
-        HttpHeaders.userAgentHeader: _iosUserAgent,
-        'Origin': 'https://www.youtube.com',
-        'X-YouTube-Client-Name': '5',
-        'X-YouTube-Client-Version': _iosClientVersion,
-      },
-    );
-
-    final status = _string(_at(data, ['playabilityStatus', 'status']));
-    if (status != 'OK') {
-      final reason = _string(_at(data, ['playabilityStatus', 'reason']));
-      throw FormatException(
-        reason.isEmpty ? 'This track is not playable.' : reason,
-      );
-    }
-    final adaptive = _at(data, ['streamingData', 'adaptiveFormats']);
-    if (adaptive is! List) {
-      throw const FormatException('No audio stream is available.');
-    }
-    final audio =
-        adaptive
-            .whereType<Map>()
-            .map((value) => Map<String, dynamic>.from(value))
-            .where(
-              (format) =>
-                  _string(format['mimeType']).startsWith('audio/') &&
-                  _string(format['url']).isNotEmpty,
-            )
-            .toList()
-          ..sort(
-            (a, b) => ((b['bitrate'] as num?)?.toInt() ?? 0).compareTo(
-              (a['bitrate'] as num?)?.toInt() ?? 0,
-            ),
-          );
-    if (audio.isEmpty) {
-      throw const FormatException('No direct audio stream is available.');
-    }
-    return _string(audio.first['url']);
+    return _resolveYouTubeMuxedStream(_postJson, song.sourceId);
   }
 
   Song? _songFromRenderer(Map<String, dynamic> renderer) {
@@ -360,6 +370,44 @@ class YouTubeMusicProvider implements MusicProvider {
     );
   }
 
+  Song? _songFromTwoRow(Map<String, dynamic> renderer) {
+    final sourceId = _findFirstString(renderer, 'videoId');
+    final title = _text(renderer['title']);
+    if (sourceId == null || title.isEmpty) return null;
+    final subtitle = _map(renderer['subtitle']);
+    final runs = subtitle?['runs'];
+    final artists = <String>[];
+    if (runs is List) {
+      for (final raw in runs.whereType<Map>()) {
+        final run = Map<String, dynamic>.from(raw);
+        final browseId = _string(
+          _at(run, ['navigationEndpoint', 'browseEndpoint', 'browseId']),
+        );
+        if (browseId.startsWith('UC')) {
+          final name = _string(run['text']);
+          if (name.isNotEmpty) artists.add(name);
+        }
+      }
+    }
+    if (artists.isEmpty) {
+      final first = _text(renderer['subtitle']).split(' • ').first.trim();
+      if (first.isNotEmpty && first != 'Song' && first != 'Video') {
+        artists.add(first);
+      }
+    }
+    return Song(
+      id: 'provider:$id:$sourceId',
+      title: title,
+      kind: 'audio',
+      url: '',
+      categoryId: 'provider:$id',
+      providerId: id,
+      sourceId: sourceId,
+      artist: artists.toSet().join(', '),
+      artworkUrl: _largestThumbnail(renderer),
+    );
+  }
+
   static Future<Map<String, dynamic>> _httpPostJson(
     Uri uri,
     Map<String, dynamic> body,
@@ -404,12 +452,9 @@ class YouTubeVideoProvider implements MusicProvider {
 
   static const _apiKey = 'AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30';
   static const _webClientVersion = '2.20260222.01.00';
-  static const _androidClientVersion = '21.26.364';
   static const _webUserAgent =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
       'AppleWebKit/537.36 Chrome/129.0.0.0 Safari/537.36';
-  static const _androidUserAgent =
-      'com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip';
 
   final ProviderJsonPoster _postJson;
 
@@ -418,6 +463,48 @@ class YouTubeVideoProvider implements MusicProvider {
 
   @override
   String get displayName => 'YouTube Videos';
+
+  @override
+  Map<String, String> playbackHeaders(Song song) => const {
+    'User-Agent': _youtubeAndroidUserAgent,
+  };
+
+  @override
+  Future<List<Song>> loadFeatured({int limit = 20}) async {
+    final data = await _postJson(
+      Uri.parse(
+        'https://www.youtube.com/youtubei/v1/browse'
+        '?alt=json&key=$_apiKey',
+      ),
+      {
+        'context': {
+          'client': {
+            'clientName': 'WEB',
+            'clientVersion': _webClientVersion,
+            'hl': 'en',
+            'gl': 'IN',
+          },
+          'user': <String, dynamic>{},
+        },
+        'browseId': 'UC-9-kyTW8ZkZNDHQJ6FgpwQ',
+      },
+      const {
+        HttpHeaders.userAgentHeader: _webUserAgent,
+        'Origin': 'https://www.youtube.com',
+        'Referer': 'https://www.youtube.com/',
+      },
+    );
+    final lockups = <Map<String, dynamic>>[];
+    _collectNamedMaps(data, 'lockupViewModel', lockups);
+    final seen = <String>{};
+    final results = <Song>[];
+    for (final lockup in lockups) {
+      final song = _songFromLockup(lockup);
+      if (song != null && seen.add(song.sourceId)) results.add(song);
+      if (results.length >= limit.clamp(1, 50)) break;
+    }
+    return results;
+  }
 
   @override
   Future<List<Song>> searchSongs(String query, {int limit = 20}) async {
@@ -478,6 +565,43 @@ class YouTubeVideoProvider implements MusicProvider {
     return results;
   }
 
+  Song? _songFromLockup(Map<String, dynamic> renderer) {
+    if (_string(renderer['contentType']) != 'LOCKUP_CONTENT_TYPE_VIDEO') {
+      return null;
+    }
+    final sourceId = _string(renderer['contentId']);
+    final metadata = _map(renderer['metadata']);
+    final lockupMetadata = _map(metadata?['lockupMetadataViewModel']);
+    final title = _string(_map(lockupMetadata?['title'])?['content']);
+    if (sourceId.isEmpty || title.isEmpty) return null;
+
+    var artist = '';
+    final detail = _map(lockupMetadata?['metadata']);
+    final contentMetadata = _map(detail?['contentMetadataViewModel']);
+    final rows = contentMetadata?['metadataRows'];
+    if (rows is List && rows.isNotEmpty && rows.first is Map) {
+      final firstRow = Map<String, dynamic>.from(rows.first as Map);
+      final parts = firstRow['metadataParts'];
+      if (parts is List && parts.isNotEmpty && parts.first is Map) {
+        final firstPart = Map<String, dynamic>.from(parts.first as Map);
+        artist = _string(_map(firstPart['text'])?['content']);
+      }
+    }
+    final durationText = _findFirstDuration(renderer);
+    return Song(
+      id: 'provider:$id:$sourceId',
+      title: title,
+      kind: 'video',
+      url: '',
+      categoryId: 'provider:$id',
+      providerId: id,
+      sourceId: sourceId,
+      artist: artist,
+      artworkUrl: _largestThumbnail(renderer),
+      durationMs: durationText == null ? 0 : _durationMs(durationText) ?? 0,
+    );
+  }
+
   @override
   Future<String> resolveStreamUrl(Song song) async {
     if (song.providerId != id || song.sourceId.isEmpty) {
@@ -485,73 +609,83 @@ class YouTubeVideoProvider implements MusicProvider {
         'This video does not belong to YouTube Videos.',
       );
     }
-    final data = await _postJson(
-      Uri.parse('https://www.youtube.com/youtubei/v1/player?prettyPrint=false'),
-      {
-        'context': {
-          'client': {
-            'clientName': 'ANDROID',
-            'clientVersion': _androidClientVersion,
-            'androidSdkVersion': 30,
-            'userAgent': _androidUserAgent,
-            'hl': 'en',
-            'platform': 'MOBILE',
-            'osName': 'Android',
-            'osVersion': '11',
-            'timeZone': 'Asia/Calcutta',
-            'gl': 'IN',
-            'utcOffsetMinutes': 330,
-          },
-        },
-        'videoId': song.sourceId,
-        'playbackContext': {
-          'contentPlaybackContext': {'html5Preference': 'HTML5_PREF_WANTS'},
-        },
-        'contentCheckOk': true,
-        'racyCheckOk': true,
-      },
-      const {
-        HttpHeaders.userAgentHeader: _androidUserAgent,
-        'Origin': 'https://www.youtube.com',
-        'X-YouTube-Client-Name': '3',
-        'X-YouTube-Client-Version': _androidClientVersion,
-      },
-    );
-
-    final status = _string(_at(data, ['playabilityStatus', 'status']));
-    if (status != 'OK') {
-      final reason = _string(_at(data, ['playabilityStatus', 'reason']));
-      throw FormatException(
-        reason.isEmpty ? 'This video is not playable.' : reason,
-      );
-    }
-    final formats = _at(data, ['streamingData', 'formats']);
-    if (formats is! List) {
-      throw const FormatException('No video stream is available.');
-    }
-    final muxed =
-        formats
-            .whereType<Map>()
-            .map((value) => Map<String, dynamic>.from(value))
-            .where(
-              (format) =>
-                  _string(format['mimeType']).startsWith('video/') &&
-                  _string(format['mimeType']).contains('mp4a') &&
-                  _string(format['url']).isNotEmpty,
-            )
-            .toList()
-          ..sort(
-            (a, b) => ((b['bitrate'] as num?)?.toInt() ?? 0).compareTo(
-              (a['bitrate'] as num?)?.toInt() ?? 0,
-            ),
-          );
-    if (muxed.isEmpty) {
-      throw const FormatException(
-        'No compatible video-with-audio stream is available.',
-      );
-    }
-    return _string(muxed.first['url']);
+    return _resolveYouTubeMuxedStream(_postJson, song.sourceId);
   }
+}
+
+const _youtubeAndroidClientVersion = '21.26.364';
+const _youtubeAndroidUserAgent =
+    'com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip';
+
+/// Resolves the highest-bitrate MP4 stream carrying both video and AAC audio
+/// through the Android player client. It is the only full-length stream
+/// YouTube serves to anonymous clients, and needs no signature deciphering.
+Future<String> _resolveYouTubeMuxedStream(
+  ProviderJsonPoster postJson,
+  String videoId,
+) async {
+  final data = await postJson(
+    Uri.parse('https://www.youtube.com/youtubei/v1/player?prettyPrint=false'),
+    {
+      'context': {
+        'client': {
+          'clientName': 'ANDROID',
+          'clientVersion': _youtubeAndroidClientVersion,
+          'androidSdkVersion': 30,
+          'userAgent': _youtubeAndroidUserAgent,
+          'hl': 'en',
+          'platform': 'MOBILE',
+          'osName': 'Android',
+          'osVersion': '11',
+          'timeZone': 'Asia/Calcutta',
+          'gl': 'IN',
+          'utcOffsetMinutes': 330,
+        },
+      },
+      'videoId': videoId,
+      'playbackContext': {
+        'contentPlaybackContext': {'html5Preference': 'HTML5_PREF_WANTS'},
+      },
+      'contentCheckOk': true,
+      'racyCheckOk': true,
+    },
+    const {
+      HttpHeaders.userAgentHeader: _youtubeAndroidUserAgent,
+      'Origin': 'https://www.youtube.com',
+      'X-YouTube-Client-Name': '3',
+      'X-YouTube-Client-Version': _youtubeAndroidClientVersion,
+    },
+  );
+
+  final status = _string(_at(data, ['playabilityStatus', 'status']));
+  if (status != 'OK') {
+    final reason = _string(_at(data, ['playabilityStatus', 'reason']));
+    throw FormatException(reason.isEmpty ? 'This is not playable.' : reason);
+  }
+  final formats = _at(data, ['streamingData', 'formats']);
+  if (formats is! List) {
+    throw const FormatException('No playable stream is available.');
+  }
+  final muxed =
+      formats
+          .whereType<Map>()
+          .map((value) => Map<String, dynamic>.from(value))
+          .where(
+            (format) =>
+                _string(format['mimeType']).startsWith('video/') &&
+                _string(format['mimeType']).contains('mp4a') &&
+                _string(format['url']).isNotEmpty,
+          )
+          .toList()
+        ..sort(
+          (a, b) => ((b['bitrate'] as num?)?.toInt() ?? 0).compareTo(
+            (a['bitrate'] as num?)?.toInt() ?? 0,
+          ),
+        );
+  if (muxed.isEmpty) {
+    throw const FormatException('No compatible stream is available.');
+  }
+  return _string(muxed.first['url']);
 }
 
 void _collectNamedMaps(
@@ -623,15 +757,34 @@ int? _durationMs(String value) {
   return seconds * 1000;
 }
 
+String? _findFirstDuration(Object? value) {
+  if (value is String &&
+      RegExp(r'^\d{1,2}:\d{2}(?::\d{2})?$').hasMatch(value.trim())) {
+    return value.trim();
+  }
+  if (value is Map) {
+    for (final child in value.values) {
+      final found = _findFirstDuration(child);
+      if (found != null) return found;
+    }
+  } else if (value is List) {
+    for (final child in value) {
+      final found = _findFirstDuration(child);
+      if (found != null) return found;
+    }
+  }
+  return null;
+}
+
 String _largestThumbnail(Object? root) {
   String best = '';
   var bestWidth = -1;
 
   void visit(Object? value) {
     if (value is Map) {
-      final thumbnails = value['thumbnails'];
-      if (thumbnails is List) {
-        for (final raw in thumbnails.whereType<Map>()) {
+      for (final images in [value['thumbnails'], value['sources']]) {
+        if (images is! List) continue;
+        for (final raw in images.whereType<Map>()) {
           final url = _string(raw['url']);
           final width = (raw['width'] as num?)?.toInt() ?? 0;
           if (url.isNotEmpty && width >= bestWidth) {
