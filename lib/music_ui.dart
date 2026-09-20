@@ -2046,17 +2046,33 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
         }
       } else if (_selectedCategory != 'Trending') {
         final q = '$_selectedCategory songs';
-        final res = await Future.wait([
-          music.fetchProviderQuery('jiosaavn', q, page: _currentPage, limit: 15),
-          music.fetchProviderQuery('ytmusic', q, page: _currentPage, limit: 15),
-        ]);
-        newSongs = [...res[0], ...res[1]];
+        if (_selectedProvider == 'ytmusic') {
+          newSongs = await music.fetchProviderQuery('ytmusic', q, page: _currentPage, limit: 20);
+        } else if (_selectedProvider == 'ytvideo') {
+          newSongs = await music.fetchProviderQuery('ytvideo', q, page: _currentPage, limit: 20);
+        } else if (_selectedProvider == 'jiosaavn') {
+          newSongs = await music.fetchProviderQuery('jiosaavn', q, page: _currentPage, limit: 20);
+        } else {
+          final res = await Future.wait([
+            music.fetchProviderQuery('jiosaavn', q, page: _currentPage, limit: 15),
+            music.fetchProviderQuery('ytmusic', q, page: _currentPage, limit: 15),
+          ]);
+          newSongs = [...res[0], ...res[1]];
+        }
       } else {
-        final res = await Future.wait([
-          music.fetchProviderQuery('jiosaavn', 'Top Bollywood Trending', page: _currentPage, limit: 15),
-          music.fetchProviderQuery('ytmusic', 'Trending Indian Music', page: _currentPage, limit: 15),
-        ]);
-        newSongs = [...res[0], ...res[1]];
+        if (_selectedProvider == 'ytmusic') {
+          newSongs = await music.fetchProviderQuery('ytmusic', 'Trending Hindi Songs', page: _currentPage, limit: 20);
+        } else if (_selectedProvider == 'ytvideo') {
+          newSongs = await music.fetchProviderQuery('ytvideo', 'Popular Music Videos Hindi', page: _currentPage, limit: 20);
+        } else if (_selectedProvider == 'jiosaavn') {
+          newSongs = await music.fetchProviderQuery('jiosaavn', 'Top Trending Hits', page: _currentPage, limit: 20);
+        } else {
+          final res = await Future.wait([
+            music.fetchProviderQuery('jiosaavn', 'Top Bollywood Trending', page: _currentPage, limit: 15),
+            music.fetchProviderQuery('ytmusic', 'Trending Indian Music', page: _currentPage, limit: 15),
+          ]);
+          newSongs = [...res[0], ...res[1]];
+        }
       }
     } catch (_) {}
 
@@ -2069,19 +2085,57 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
         if (_searchController.text.trim().isNotEmpty) {
           final existingIds = _searchResults.map((s) => s.id).toSet();
           final unique = newSongs.where((s) => !existingIds.contains(s.id)).toList();
-          _searchResults = [..._searchResults, ...unique];
+          if (unique.isEmpty) {
+            _hasMore = false;
+          } else {
+            _searchResults = [..._searchResults, ...unique];
+          }
         } else if (_selectedCategory != 'Trending') {
           final current = _cachedCategories[_selectedCategory] ?? [];
           final existingIds = current.map((s) => s.id).toSet();
           final unique = newSongs.where((s) => !existingIds.contains(s.id)).toList();
-          _cachedCategories[_selectedCategory] = [...current, ...unique];
+          if (unique.isEmpty) {
+            _hasMore = false;
+          } else {
+            _cachedCategories[_selectedCategory] = [...current, ...unique];
+          }
         } else {
-          final existingJio = _jioTrending.map((s) => s.id).toSet();
-          final existingYt = _ytHits.map((s) => s.id).toSet();
-          final newJio = newSongs.where((s) => s.providerId == 'jiosaavn' && !existingJio.contains(s.id));
-          final newYt = newSongs.where((s) => s.providerId == 'ytmusic' && !existingYt.contains(s.id));
-          _jioTrending = [..._jioTrending, ...newJio];
-          _ytHits = [..._ytHits, ...newYt];
+          if (_selectedProvider == 'ytvideo') {
+            final existingYtVid = _ytVideos.map((s) => s.id).toSet();
+            final unique = newSongs.where((s) => !existingYtVid.contains(s.id)).toList();
+            if (unique.isEmpty) {
+              _hasMore = false;
+            } else {
+              _ytVideos = [..._ytVideos, ...unique];
+            }
+          } else if (_selectedProvider == 'ytmusic') {
+            final existingYt = _ytHits.map((s) => s.id).toSet();
+            final unique = newSongs.where((s) => !existingYt.contains(s.id)).toList();
+            if (unique.isEmpty) {
+              _hasMore = false;
+            } else {
+              _ytHits = [..._ytHits, ...unique];
+            }
+          } else if (_selectedProvider == 'jiosaavn') {
+            final existingJio = _jioTrending.map((s) => s.id).toSet();
+            final unique = newSongs.where((s) => !existingJio.contains(s.id)).toList();
+            if (unique.isEmpty) {
+              _hasMore = false;
+            } else {
+              _jioTrending = [..._jioTrending, ...unique];
+            }
+          } else {
+            final existingJio = _jioTrending.map((s) => s.id).toSet();
+            final existingYt = _ytHits.map((s) => s.id).toSet();
+            final newJio = newSongs.where((s) => s.providerId == 'jiosaavn' && !existingJio.contains(s.id)).toList();
+            final newYt = newSongs.where((s) => s.providerId == 'ytmusic' && !existingYt.contains(s.id)).toList();
+            if (newJio.isEmpty && newYt.isEmpty) {
+              _hasMore = false;
+            } else {
+              _jioTrending = [..._jioTrending, ...newJio];
+              _ytHits = [..._ytHits, ...newYt];
+            }
+          }
         }
       }
     });
@@ -2492,25 +2546,75 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
     final yt = _filterByProvider(_ytHits);
     final videos = _filterByProvider(_ytVideos);
 
+    if (_selectedProvider != 'all') {
+      final currentList = switch (_selectedProvider) {
+        'jiosaavn' => jio,
+        'ytmusic' => yt,
+        'ytvideo' => videos,
+        _ => <Song>[],
+      };
+      final providerName = switch (_selectedProvider) {
+        'jiosaavn' => 'JioSaavn',
+        'ytmusic' => 'YouTube Music',
+        'ytvideo' => 'YouTube Videos',
+        _ => '',
+      };
+      if (currentList.isEmpty) {
+        return const SizedBox.shrink();
+      }
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                '$providerName Tracks (${currentList.length})',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: currentList.length,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                mainAxisSpacing: 14,
+                crossAxisSpacing: 14,
+                childAspectRatio: 0.72,
+              ),
+              itemBuilder: (context, index) {
+                return _SpotifySongCard(
+                  song: currentList[index],
+                  queue: currentList,
+                );
+              },
+            ),
+          ],
+        ),
+      );
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (jio.isNotEmpty &&
-            (_selectedProvider == 'all' || _selectedProvider == 'jiosaavn'))
+        if (jio.isNotEmpty)
           _SpotifySection(
             title: 'JioSaavn Trending Hits',
             subtitle: 'Top Bollywood & Hindi tracks',
             songs: jio,
           ),
-        if (yt.isNotEmpty &&
-            (_selectedProvider == 'all' || _selectedProvider == 'ytmusic'))
+        if (yt.isNotEmpty)
           _SpotifySection(
             title: 'YouTube Music Hot Tracks',
             subtitle: 'Global & trending stream releases',
             songs: yt,
           ),
-        if (videos.isNotEmpty &&
-            (_selectedProvider == 'all' || _selectedProvider == 'ytvideo'))
+        if (videos.isNotEmpty)
           _SpotifySection(
             title: 'Trending Music Videos',
             subtitle: 'Stream popular YouTube music videos',

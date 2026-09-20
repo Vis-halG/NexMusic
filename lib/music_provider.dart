@@ -261,16 +261,25 @@ class YouTubeMusicProvider implements MusicProvider {
         : results;
   }
 
+  final Map<String, String> _continuations = {};
+
   @override
   Future<List<Song>> searchSongs(String query, {int limit = 20, int page = 1}) async {
     final value = query.trim();
     if (value.isEmpty) return const [];
-    final data = await _postJson(
-      Uri.parse(
+
+    final cacheKey = '$value:$page';
+    final token = page > 1 ? _continuations[cacheKey] : null;
+
+    final Uri searchUri;
+    final Map<String, dynamic> payload;
+
+    if (token != null && token.isNotEmpty) {
+      searchUri = Uri.parse(
         'https://music.youtube.com/youtubei/v1/search'
-        '?alt=json&key=$_apiKey',
-      ),
-      {
+        '?continuation=$token&alt=json&key=$_apiKey',
+      );
+      payload = {
         'context': {
           'client': {
             'clientName': 'WEB_REMIX',
@@ -280,15 +289,41 @@ class YouTubeMusicProvider implements MusicProvider {
           },
           'user': <String, dynamic>{},
         },
-        'query': value,
+      };
+    } else {
+      searchUri = Uri.parse(
+        'https://music.youtube.com/youtubei/v1/search'
+        '?alt=json&key=$_apiKey',
+      );
+      payload = {
+        'context': {
+          'client': {
+            'clientName': 'WEB_REMIX',
+            'clientVersion': _webClientVersion,
+            'hl': 'en',
+            'gl': 'IN',
+          },
+          'user': <String, dynamic>{},
+        },
+        'query': page > 1 ? '$value part $page' : value,
         'params': _trackSearchParams,
-      },
+      };
+    }
+
+    final data = await _postJson(
+      searchUri,
+      payload,
       const {
         HttpHeaders.userAgentHeader: _webUserAgent,
         'Origin': 'https://music.youtube.com',
         'Referer': 'https://music.youtube.com/',
       },
     );
+
+    final nextToken = _extractContinuationToken(data);
+    if (nextToken != null && nextToken.isNotEmpty) {
+      _continuations['$value:${page + 1}'] = nextToken;
+    }
 
     final renderers = <Map<String, dynamic>>[];
     _collectNamedMaps(data, 'musicResponsiveListItemRenderer', renderers);
@@ -300,6 +335,21 @@ class YouTubeMusicProvider implements MusicProvider {
       if (results.length >= limit.clamp(1, 50)) break;
     }
     return results;
+  }
+
+  String? _extractContinuationToken(dynamic data) {
+    final commands = <Map<String, dynamic>>[];
+    _collectNamedMaps(data, 'continuationCommand', commands);
+    if (commands.isNotEmpty && commands.first['token'] is String) {
+      return commands.first['token'] as String;
+    }
+    try {
+      final jsonStr = jsonEncode(data);
+      final match = RegExp(r'"continuation":\s*"([^"]+)"').firstMatch(jsonStr);
+      return match?.group(1);
+    } catch (_) {
+      return null;
+    }
   }
 
   /// YouTube withholds full-length audio-only streams from anonymous clients
@@ -506,16 +556,25 @@ class YouTubeVideoProvider implements MusicProvider {
     return results;
   }
 
+  final Map<String, String> _continuations = {};
+
   @override
   Future<List<Song>> searchSongs(String query, {int limit = 20, int page = 1}) async {
     final value = query.trim();
     if (value.isEmpty) return const [];
-    final data = await _postJson(
-      Uri.parse(
+
+    final cacheKey = '$value:$page';
+    final token = page > 1 ? _continuations[cacheKey] : null;
+
+    final Uri searchUri;
+    final Map<String, dynamic> payload;
+
+    if (token != null && token.isNotEmpty) {
+      searchUri = Uri.parse(
         'https://www.youtube.com/youtubei/v1/search'
-        '?alt=json&key=$_apiKey',
-      ),
-      {
+        '?continuation=$token&alt=json&key=$_apiKey',
+      );
+      payload = {
         'context': {
           'client': {
             'clientName': 'WEB',
@@ -525,15 +584,41 @@ class YouTubeVideoProvider implements MusicProvider {
           },
           'user': <String, dynamic>{},
         },
-        'query': value,
+      };
+    } else {
+      searchUri = Uri.parse(
+        'https://www.youtube.com/youtubei/v1/search'
+        '?alt=json&key=$_apiKey',
+      );
+      payload = {
+        'context': {
+          'client': {
+            'clientName': 'WEB',
+            'clientVersion': _webClientVersion,
+            'hl': 'en',
+            'gl': 'IN',
+          },
+          'user': <String, dynamic>{},
+        },
+        'query': page > 1 ? '$value part $page' : value,
         'params': 'EgIQAQ%3D%3D',
-      },
+      };
+    }
+
+    final data = await _postJson(
+      searchUri,
+      payload,
       const {
         HttpHeaders.userAgentHeader: _webUserAgent,
         'Origin': 'https://www.youtube.com',
         'Referer': 'https://www.youtube.com/',
       },
     );
+
+    final nextToken = _extractVideoContinuationToken(data);
+    if (nextToken != null && nextToken.isNotEmpty) {
+      _continuations['$value:${page + 1}'] = nextToken;
+    }
 
     final renderers = <Map<String, dynamic>>[];
     _collectNamedMaps(data, 'videoRenderer', renderers);
@@ -563,6 +648,21 @@ class YouTubeVideoProvider implements MusicProvider {
       if (results.length >= limit.clamp(1, 50)) break;
     }
     return results;
+  }
+
+  String? _extractVideoContinuationToken(dynamic data) {
+    final commands = <Map<String, dynamic>>[];
+    _collectNamedMaps(data, 'continuationCommand', commands);
+    if (commands.isNotEmpty && commands.first['token'] is String) {
+      return commands.first['token'] as String;
+    }
+    try {
+      final jsonStr = jsonEncode(data);
+      final match = RegExp(r'"token":\s*"([^"]+)"').firstMatch(jsonStr);
+      return match?.group(1);
+    } catch (_) {
+      return null;
+    }
   }
 
   Song? _songFromLockup(Map<String, dynamic> renderer) {
