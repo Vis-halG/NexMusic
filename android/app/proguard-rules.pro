@@ -5,3 +5,7 @@
 -dontwarn androidx.media3.exoplayer.hls.**
 -dontwarn androidx.media3.exoplayer.rtsp.**
 -dontwarn androidx.media3.exoplayer.smoothstreaming.**
+
+# Size optimizations for R8
+-repackageclasses ''
+-allowaccessmodification

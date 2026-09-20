@@ -51,6 +51,10 @@ android {
                 "kotlin/**",
                 "DebugProbesKt.bin",
                 "META-INF/*.version",
+                "META-INF/*.kotlin_module",
+                "META-INF/LICENSE*",
+                "META-INF/NOTICE*",
+                "META-INF/DEPENDENCIES*",
                 "kotlin-tooling-metadata.json",
             )
         }

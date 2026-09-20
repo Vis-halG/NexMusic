@@ -60,7 +60,7 @@ jobs:
           EOF
 
       - name: Build Android APK
-        run: flutter build apk --release --target-platform android-arm64
+        run: flutter build apk --release --target-platform android-arm64 --obfuscate --split-debug-info=build/symbols --extra-gen-snapshot-options=--strip
 
       - name: Prepare release assets
         run: |

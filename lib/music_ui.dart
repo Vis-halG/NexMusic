@@ -1047,21 +1047,13 @@ class _MusicShellState extends State<MusicShell> {
         case 'upload':
           _push(context, const UploadScreen());
         case 'search':
-          _searchRequests.value++;
+          setState(() => _currentTabIndex = 1);
         case 'browser':
           if (_webViewSupported) {
             _push(context, const NexBrowserScreen(sharedLink: ''));
           }
         case 'downloads':
-          _push(
-            context,
-            SongListScreen(
-              title: 'Downloads',
-              emptyText:
-                  'Tap ⋮ on a song and choose Download to play it without internet.',
-              select: (music) => music.downloadedSongs,
-            ),
-          );
+          setState(() => _currentTabIndex = 2);
       }
     });
   }
@@ -1072,6 +1064,8 @@ class _MusicShellState extends State<MusicShell> {
     _launchSubscription?.cancel();
     super.dispose();
   }
+
+  int _currentTabIndex = 0;
 
   @override
   Widget build(BuildContext context) {
@@ -1090,14 +1084,59 @@ class _MusicShellState extends State<MusicShell> {
         music.clearNotice();
       });
     }
+
+    final Widget currentView = switch (_currentTabIndex) {
+      1 => const _SpotifyBrowseView(),
+      2 => const _SpotifyLibraryView(),
+      _ => const _SpotifyHomeView(),
+    };
+
     return Scaffold(
-      body: const SafeArea(bottom: false, child: _CatalogView()),
-      floatingActionButton: FloatingActionButton(
-        tooltip: 'Play random',
-        onPressed: () => _playRandomSong(context),
-        child: const Icon(Icons.shuffle_rounded),
+      body: SafeArea(bottom: false, child: currentView),
+      floatingActionButton: _currentTabIndex == 0
+          ? FloatingActionButton(
+              tooltip: 'Play random',
+              onPressed: () => _playRandomSong(context),
+              child: const Icon(Icons.shuffle_rounded),
+            )
+          : null,
+      bottomNavigationBar: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const MiniPlayer(),
+          NavigationBar(
+            selectedIndex: _currentTabIndex,
+            onDestinationSelected: (index) {
+              setState(() => _currentTabIndex = index);
+            },
+            backgroundColor: Theme.of(context).colorScheme.surface,
+            elevation: 8,
+            indicatorColor: NexMusicApp.violet.withValues(alpha: 0.18),
+            destinations: const [
+              NavigationDestination(
+                icon: Icon(Icons.home_outlined),
+                selectedIcon:
+                    Icon(Icons.home_rounded, color: NexMusicApp.violet),
+                label: 'Home',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.search_rounded),
+                selectedIcon:
+                    Icon(Icons.search_rounded, color: NexMusicApp.violet),
+                label: 'Search',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.library_music_outlined),
+                selectedIcon: Icon(
+                  Icons.library_music_rounded,
+                  color: NexMusicApp.violet,
+                ),
+                label: 'Your Library',
+              ),
+            ],
+          ),
+        ],
       ),
-      bottomNavigationBar: const MiniPlayer(),
     );
   }
 
@@ -1123,364 +1162,1115 @@ class _MusicShellState extends State<MusicShell> {
   }
 }
 
-class _CatalogView extends StatefulWidget {
-  const _CatalogView();
-
-  @override
-  State<_CatalogView> createState() => _CatalogViewState();
+String _timeGreeting() {
+  final hour = DateTime.now().hour;
+  if (hour < 12) return 'Good morning';
+  if (hour < 17) return 'Good afternoon';
+  return 'Good evening';
 }
 
-class _CatalogViewState extends State<_CatalogView> {
-  final _search = TextEditingController();
-  String? _categoryId;
-  bool _searching = false;
-  Timer? _providerDebounce;
+// ─────────────────────────────────────────────────────────────────────────────
+// Spotify-Style Components
+// ─────────────────────────────────────────────────────────────────────────────
 
-  @override
-  void initState() {
-    super.initState();
-    _searchRequests.addListener(_openSearch);
-  }
+class _SpotifySongCard extends StatelessWidget {
+  const _SpotifySongCard({
+    required this.song,
+    required this.queue,
+    this.width = 142,
+  });
 
-  void _openSearch() {
-    if (mounted) setState(() => _searching = true);
-  }
-
-  @override
-  void dispose() {
-    _searchRequests.removeListener(_openSearch);
-    _providerDebounce?.cancel();
-    _search.dispose();
-    super.dispose();
-  }
-
-  Future<void> _newCategory() async {
-    final category = await _createCategory(context);
-    if (!mounted || category == null) return;
-    setState(() => _categoryId = category.id);
-  }
+  final Song song;
+  final List<Song> queue;
+  final double width;
 
   @override
   Widget build(BuildContext context) {
-    final music = context.watch<MusicController>();
-    // A category deleted elsewhere falls back to "All".
-    final selectedProviderId = _providerIdFromCategory(_categoryId);
-    final selected =
-        selectedProviderId != null && music.hasProvider(selectedProviderId)
-        ? _categoryId
-        : _categoryId != null && music.categoryById(_categoryId!) != null
-        ? _categoryId
-        : null;
-    final query = _search.text.trim().toLowerCase();
-    final providerId = _providerIdFromCategory(selected);
-    final providerSelected = providerId != null;
-    final visible = providerSelected
-        ? music.providerSongs
-        : music
-              .songsIn(selected)
-              .where(
-                (song) =>
-                    query.isEmpty ||
-                    song.title.toLowerCase().contains(query) ||
-                    music
-                        .categoryName(song.categoryId)
-                        .toLowerCase()
-                        .contains(query),
-              )
-              .toList();
+    final scheme = Theme.of(context).colorScheme;
+    final isCurrent = context.select<MusicController, bool>(
+      (m) => m.current?.id == song.id,
+    );
+    final isPlaying = context.select<MusicController, bool>(
+      (m) => m.playing && isCurrent,
+    );
+
+    return SizedBox(
+      width: width,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => _openSong(context, song, queue: queue),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Stack(
+              children: [
+                Container(
+                  width: width,
+                  height: width,
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainer,
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.25),
+                        blurRadius: 8,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: song.artworkUrl.isNotEmpty
+                      ? Image.network(
+                          song.artworkUrl,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => _fallback(scheme),
+                        )
+                      : _fallback(scheme),
+                ),
+                Positioned(
+                  right: 8,
+                  bottom: 8,
+                  child: Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: isCurrent
+                          ? NexMusicApp.violet
+                          : const Color(0xFF1DB954),
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.4),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Icon(
+                      isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                      color: Colors.white,
+                      size: 22,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              song.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+                color: isCurrent ? NexMusicApp.violet : scheme.onSurface,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              song.artist.isNotEmpty
+                  ? song.artist
+                  : (song.isProvider
+                      ? 'Online stream'
+                      : (song.ownerName.isNotEmpty
+                          ? song.ownerName
+                          : 'NexMusic')),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: scheme.onSurfaceVariant,
+                fontSize: 11,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _fallback(ColorScheme scheme) {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            NexMusicApp.violet.withValues(alpha: 0.35),
+            scheme.surfaceContainerHighest,
+          ],
+        ),
+      ),
+      child: Center(
+        child: Icon(
+          song.isVideo ? Icons.play_arrow_rounded : Icons.music_note_rounded,
+          size: 38,
+          color: NexMusicApp.violet.withValues(alpha: 0.7),
+        ),
+      ),
+    );
+  }
+}
+
+class _SpotifyQuickTile extends StatelessWidget {
+  const _SpotifyQuickTile({
+    required this.title,
+    required this.icon,
+    this.gradient,
+    this.imageUrl,
+    required this.onTap,
+  });
+
+  final String title;
+  final IconData icon;
+  final Gradient? gradient;
+  final String? imageUrl;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surfaceContainer,
+      borderRadius: BorderRadius.circular(8),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Row(
+          children: [
+            Container(
+              width: 52,
+              height: 52,
+              decoration: BoxDecoration(
+                gradient: gradient ??
+                    LinearGradient(
+                      colors: [
+                        NexMusicApp.violet,
+                        NexMusicApp.violet.withValues(alpha: 0.6),
+                      ],
+                    ),
+              ),
+              child: imageUrl != null && imageUrl!.isNotEmpty
+                  ? Image.network(
+                      imageUrl!,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) =>
+                          Icon(icon, color: Colors.white, size: 24),
+                    )
+                  : Icon(icon, color: Colors.white, size: 24),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                  height: 1.2,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(
+                  color: NexMusicApp.violet.withValues(alpha: 0.15),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.play_arrow_rounded,
+                  size: 18,
+                  color: NexMusicApp.violet,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SpotifySection extends StatelessWidget {
+  const _SpotifySection({
+    required this.title,
+    this.subtitle,
+    required this.songs,
+    this.onSeeAll,
+  });
+
+  final String title;
+  final String? subtitle;
+  final List<Song> songs;
+  final VoidCallback? onSeeAll;
+
+  @override
+  Widget build(BuildContext context) {
+    if (songs.isEmpty) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
 
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _searching ? _searchBar(music, providerId: providerId) : _header(music),
-        SizedBox(
-          height: 52,
-          child: ListView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.fromLTRB(20, 8, 12, 8),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 16, 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              _Pill(
-                label: 'All',
-                selected: selected == null,
-                onTap: () => setState(() => _categoryId = null),
-              ),
-              for (final category in music.categories)
-                _Pill(
-                  label: category.name,
-                  selected: selected == category.id,
-                  onTap: () => setState(() => _categoryId = category.id),
-                  onLongPress: () => _categoryActions(context, category),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.3,
+                      ),
+                    ),
+                    if (subtitle != null) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle!,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
-              for (final provider in music.musicProviders)
-                _Pill(
-                  icon: switch (provider.id) {
-                    'ytmusic' => Icons.play_circle_outline_rounded,
-                    'ytvideo' => Icons.video_library_outlined,
-                    _ => Icons.public_rounded,
-                  },
-                  label: provider.name,
-                  selected: providerId == provider.id,
-                  onTap: () {
-                    _providerDebounce?.cancel();
-                    _search.clear();
-                    music.selectProvider(provider.id);
-                    setState(() {
-                      _categoryId = _providerCategoryId(provider.id);
-                      _searching = false;
-                    });
-                    unawaited(music.loadProviderHome(provider.id));
-                  },
-                ),
-              _Pill(
-                icon: Icons.add_rounded,
-                label: 'Category',
-                onTap: _newCategory,
               ),
-              if (music.categories.isNotEmpty)
-                _Pill(
-                  icon: Icons.edit_outlined,
-                  label: 'Edit',
-                  onTap: () => _push(context, const CategoryManagerScreen()),
+              if (onSeeAll != null)
+                TextButton(
+                  onPressed: onSeeAll,
+                  style: TextButton.styleFrom(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: const Text(
+                    'Show all',
+                    style: TextStyle(
+                      color: NexMusicApp.violet,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 12,
+                    ),
+                  ),
                 ),
             ],
           ),
         ),
-        // A shared song sent to upload shows what its hidden browser is doing,
-        // in the place the upload progress takes once the audio arrives.
-        ValueListenableBuilder<List<SharedAudioJob>>(
-          valueListenable: SharedAudioJob.running,
-          builder: (context, jobs, _) {
-            final waiting = [
-              for (final job in jobs)
-                if (job.uploadRequested) job,
-            ];
-            if (waiting.isEmpty) return const SizedBox.shrink();
-            return ListenableBuilder(
-              listenable: Listenable.merge(waiting),
-              builder: (context, _) {
-                final job = waiting.first;
-                final title = job.requestTitle ?? '';
-                final others = waiting.length - 1;
-                return Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 2, 20, 10),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        [
-                          job.status,
-                          if (title.isNotEmpty) title,
-                          if (others > 0) '$others more waiting',
-                        ].join(' · '),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(color: _muted(context), fontSize: 12),
-                      ),
-                      const SizedBox(height: 6),
-                      LinearProgressIndicator(
-                        value: job.fraction,
-                        minHeight: 3,
-                      ),
-                    ],
-                  ),
-                );
-              },
-            );
-          },
-        ),
-        if (music.uploads.isNotEmpty)
-          InkWell(
-            onTap: () => _push(context, const UploadScreen()),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 2, 20, 10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    music.uploading
-                        ? music.uploadsPaused
-                              ? 'Uploads paused · tap to resume'
-                              : 'Uploading ${music.uploadsFinished} of ${music.uploads.length}'
-                        : 'Uploads finished · tap to review',
-                    style: TextStyle(color: _muted(context), fontSize: 12),
-                  ),
-                  const SizedBox(height: 6),
-                  LinearProgressIndicator(
-                    value: music.uploadFraction,
-                    minHeight: 3,
-                  ),
-                ],
-              ),
+        SizedBox(
+          height: 195,
+          child: ListView.separated(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            scrollDirection: Axis.horizontal,
+            itemCount: songs.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 14),
+            itemBuilder: (_, i) => _SpotifySongCard(
+              song: songs[i],
+              queue: songs,
             ),
-          ),
-        Expanded(
-          child: _list(
-            music,
-            visible,
-            query,
-            providerSelected: providerSelected,
           ),
         ),
       ],
     );
   }
+}
 
-  Widget _header(MusicController music) => Padding(
-    padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
-    child: Row(
-      children: [
-        const Expanded(
-          child: Text(
-            'nexMusic',
-            style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.w700,
-              letterSpacing: -0.4,
+// ─────────────────────────────────────────────────────────────────────────────
+// Spotify Home View
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _SpotifyHomeView extends StatefulWidget {
+  const _SpotifyHomeView();
+
+  @override
+  State<_SpotifyHomeView> createState() => _SpotifyHomeViewState();
+}
+
+class _SpotifyHomeViewState extends State<_SpotifyHomeView> {
+  String? _selectedCategory;
+
+  @override
+  Widget build(BuildContext context) {
+    final music = context.watch<MusicController>();
+    final recentSongs = music.recentSongs;
+    final likedSongs = music.likedSongs;
+    final allSongs = music.songs;
+
+    return RefreshIndicator(
+      onRefresh: music.refreshCatalog,
+      child: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 12, 10),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _timeGreeting(),
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.4,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Upload song',
+                    onPressed: () => _push(context, const UploadScreen()),
+                    icon: const Icon(Icons.add_circle_outline_rounded),
+                  ),
+                  IconButton(
+                    tooltip: 'Profile',
+                    onPressed: () => _push(context, const ProfileScreen()),
+                    icon: _Avatar(initials: music.profileInitials, size: 32),
+                  ),
+                ],
+              ),
             ),
           ),
-        ),
-        IconButton(
-          tooltip: 'Upload song',
-          onPressed: () => _push(context, const UploadScreen()),
-          icon: const Icon(Icons.add_rounded),
-        ),
-        IconButton(
-          tooltip: 'Search',
-          onPressed: () => setState(() => _searching = true),
-          icon: const Icon(Icons.search_rounded),
-        ),
-        IconButton(
-          tooltip: 'Profile',
-          onPressed: () => _push(context, const ProfileScreen()),
-          icon: _Avatar(initials: music.profileInitials, size: 32),
-        ),
-      ],
-    ),
-  );
 
-  Widget _searchBar(MusicController music, {required String? providerId}) =>
-      Padding(
-        padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _search,
-                autofocus: true,
-                textInputAction: TextInputAction.search,
-                onChanged: (value) {
-                  setState(() {});
-                  if (providerId == null) return;
-                  _providerDebounce?.cancel();
-                  _providerDebounce = Timer(
-                    const Duration(milliseconds: 450),
-                    () => value.trim().isEmpty
-                        ? music.loadProviderHome(providerId)
-                        : music.searchProvider(value, providerId: providerId),
-                  );
-                },
-                onSubmitted: providerId != null
-                    ? (value) {
-                        _providerDebounce?.cancel();
-                        if (value.trim().isEmpty) {
-                          music.loadProviderHome(providerId);
-                        } else {
-                          music.searchProvider(value, providerId: providerId);
-                        }
+          // Horizontal Category Filter Pills
+          SliverToBoxAdapter(
+            child: SizedBox(
+              height: 48,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+                children: [
+                  _Pill(
+                    label: 'All',
+                    selected: _selectedCategory == null,
+                    onTap: () => setState(() => _selectedCategory = null),
+                  ),
+                  for (final cat in music.categories)
+                    _Pill(
+                      label: cat.name,
+                      selected: _selectedCategory == cat.id,
+                      onTap: () => setState(() => _selectedCategory = cat.id),
+                      onLongPress: () => _categoryActions(context, cat),
+                    ),
+                  _Pill(
+                    icon: Icons.add_rounded,
+                    label: 'New',
+                    onTap: () async {
+                      final cat = await _createCategory(context);
+                      if (cat != null && mounted) {
+                        setState(() => _selectedCategory = cat.id);
                       }
-                    : null,
-                decoration: InputDecoration(
-                  hintText: providerId != null
-                      ? 'Search ${music.providerNameFor(providerId)}'
-                      : 'Search songs or categories',
-                  prefixIcon: const Icon(Icons.search_rounded),
-                  isDense: true,
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          // Upload / conversion progress
+          if (music.uploads.isNotEmpty)
+            SliverToBoxAdapter(
+              child: InkWell(
+                onTap: () => _push(context, const UploadScreen()),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 6, 20, 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        music.uploading
+                            ? 'Uploading ${music.uploadsFinished} of ${music.uploads.length}'
+                            : 'Uploads finished · tap to review',
+                        style: TextStyle(color: _muted(context), fontSize: 12),
+                      ),
+                      const SizedBox(height: 6),
+                      LinearProgressIndicator(
+                        value: music.uploadFraction,
+                        minHeight: 3,
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-            IconButton(
-              tooltip: 'Close search',
-              onPressed: () {
-                _providerDebounce?.cancel();
-                setState(() {
-                  _searching = false;
-                  _search.clear();
-                });
-                if (providerId != null) music.loadProviderHome(providerId);
-              },
-              icon: const Icon(Icons.close_rounded),
-            ),
-          ],
-        ),
-      );
 
-  Widget _list(
-    MusicController music,
-    List<Song> visible,
-    String query, {
-    required bool providerSelected,
-  }) {
-    if (providerSelected && music.providerLoading && visible.isEmpty) {
-      return const Center(
-        child: SizedBox.square(
-          dimension: 22,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
-      );
-    }
-    if (!providerSelected && !music.catalogLoaded) {
-      return const Center(
-        child: SizedBox.square(
-          dimension: 22,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
-      );
-    }
-    return RefreshIndicator(
-      onRefresh: providerSelected
-          ? () {
-              final selectedProvider = _providerIdFromCategory(_categoryId)!;
-              return query.isEmpty
-                  ? music.loadProviderHome(selectedProvider)
-                  : music.searchProvider(
-                      _search.text,
-                      providerId: selectedProvider,
-                    );
-            }
-          : music.refreshCatalog,
-      child: visible.isEmpty
-          ? ListView(
-              children: [
-                const SizedBox(height: 80),
-                _EmptyState(
-                  icon: providerSelected && music.providerError != null
-                      ? Icons.cloud_off_rounded
-                      : query.isEmpty
-                      ? Icons.library_music_outlined
-                      : Icons.search_off_rounded,
-                  title: providerSelected
-                      ? music.providerError ??
-                            (query.isEmpty
-                                ? 'No recommendations right now'
-                                : 'Nothing found')
-                      : query.isEmpty
-                      ? 'No songs here yet'
-                      : 'Nothing found',
-                  subtitle: providerSelected
-                      ? query.isEmpty
-                            ? 'Pull down to refresh, or use search.'
-                            : 'Pull down to try again.'
-                      : query.isEmpty
-                      ? 'Tap + to upload the first one.'
-                      : 'Try another word.',
+          // IF A SPECIFIC CATEGORY IS SELECTED: Show filtered tracklist
+          if (_selectedCategory != null) ...[
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      music.categoryName(_selectedCategory!),
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 8),
+                        minimumSize: Size.zero,
+                      ),
+                      onPressed: () {
+                        final songs = music.songsIn(_selectedCategory);
+                        if (songs.isNotEmpty) {
+                          _openSong(context, songs.first, queue: songs);
+                        }
+                      },
+                      icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                      label: const Text('Play'),
+                    ),
+                  ],
                 ),
-              ],
-            )
-          : ListView.builder(
-              padding: const EdgeInsets.only(top: 4, bottom: 96),
-              itemCount: visible.length,
-              itemBuilder: (context, i) =>
-                  SongTile(song: visible[i], queue: visible),
+              ),
             ),
+            SliverList(
+              delegate: SliverChildBuilderDelegate(
+                (context, index) {
+                  final list = music.songsIn(_selectedCategory);
+                  if (list.isEmpty) {
+                    return const Padding(
+                      padding: EdgeInsets.all(40),
+                      child: Center(
+                        child: Text(
+                          'No songs in this category yet',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      ),
+                    );
+                  }
+                  return SongTile(song: list[index], queue: list);
+                },
+                childCount: math.max(1, music.songsIn(_selectedCategory).length),
+              ),
+            ),
+          ] else ...[
+            // QUICK ACCESS HERO GRID (Top 4-6 cards)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    return GridView.count(
+                      crossAxisCount: 2,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 10,
+                      childAspectRatio: 2.7,
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      children: [
+                        _SpotifyQuickTile(
+                          title: 'Liked Songs',
+                          icon: Icons.favorite_rounded,
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFF8B5CF6), Color(0xFF4C1D95)],
+                          ),
+                          onTap: () {
+                            if (likedSongs.isNotEmpty) {
+                              _openSong(context, likedSongs.first,
+                                  queue: likedSongs);
+                            } else {
+                              _push(
+                                context,
+                                SongListScreen(
+                                  title: 'Liked Songs',
+                                  emptyText: 'No liked songs yet.',
+                                  select: (m) => m.likedSongs,
+                                ),
+                              );
+                            }
+                          },
+                        ),
+                        _SpotifyQuickTile(
+                          title: 'Recently Played',
+                          icon: Icons.history_rounded,
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFF3B82F6), Color(0xFF1E3A8A)],
+                          ),
+                          onTap: () {
+                            if (recentSongs.isNotEmpty) {
+                              _openSong(context, recentSongs.first,
+                                  queue: recentSongs);
+                            }
+                          },
+                        ),
+                        _SpotifyQuickTile(
+                          title: 'Downloads',
+                          icon: Icons.offline_pin_rounded,
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFF10B981), Color(0xFF064E3B)],
+                          ),
+                          onTap: () => _push(
+                            context,
+                            SongListScreen(
+                              title: 'Downloads',
+                              emptyText: 'No downloaded songs.',
+                              select: (m) => m.downloadedSongs,
+                            ),
+                          ),
+                        ),
+                        if (music.categories.isNotEmpty)
+                          _SpotifyQuickTile(
+                            title: music.categories.first.name,
+                            icon: Icons.queue_music_rounded,
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFFEC4899), Color(0xFF831843)],
+                            ),
+                            onTap: () {
+                              final catSongs =
+                                  music.songsIn(music.categories.first.id);
+                              if (catSongs.isNotEmpty) {
+                                _openSong(context, catSongs.first,
+                                    queue: catSongs);
+                              } else {
+                                setState(() =>
+                                    _selectedCategory = music.categories.first.id);
+                              }
+                            },
+                          ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ),
+
+            // SECTION: Recently Played
+            if (recentSongs.isNotEmpty)
+              SliverToBoxAdapter(
+                child: _SpotifySection(
+                  title: 'Recently Played',
+                  songs: recentSongs,
+                  onSeeAll: () => _push(
+                    context,
+                    SongListScreen(
+                      title: 'Recently Played',
+                      emptyText: 'No recent history.',
+                      select: (m) => m.recentSongs,
+                    ),
+                  ),
+                ),
+              ),
+
+            // SECTION: Trending & New Uploads
+            if (allSongs.isNotEmpty)
+              SliverToBoxAdapter(
+                child: _SpotifySection(
+                  title: 'Trending & New Releases',
+                  subtitle: 'Fresh community uploads',
+                  songs: allSongs.take(15).toList(),
+                ),
+              ),
+
+            // DYNAMIC CATEGORY CAROUSELS
+            for (final cat in music.categories)
+              if (music.songsIn(cat.id).isNotEmpty)
+                SliverToBoxAdapter(
+                  child: _SpotifySection(
+                    title: cat.name,
+                    subtitle: 'Category playlist',
+                    songs: music.songsIn(cat.id),
+                    onSeeAll: () => setState(() => _selectedCategory = cat.id),
+                  ),
+                ),
+
+            // YOUTUBE MUSIC & ONLINE SECTION
+            if (music.providerSongs.isNotEmpty)
+              SliverToBoxAdapter(
+                child: _SpotifySection(
+                  title: 'YouTube Music Highlights',
+                  subtitle: 'Top online streams',
+                  songs: music.providerSongs,
+                ),
+              ),
+
+            const SliverToBoxAdapter(child: SizedBox(height: 80)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spotify Browse / Search View
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _SpotifyBrowseCard extends StatelessWidget {
+  const _SpotifyBrowseCard({
+    required this.title,
+    required this.colors,
+    required this.icon,
+    required this.onTap,
+  });
+
+  final String title;
+  final List<Color> colors;
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      borderRadius: BorderRadius.circular(12),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Container(
+          height: 96,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: colors,
+            ),
+          ),
+          child: Stack(
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 16,
+                  letterSpacing: -0.2,
+                ),
+              ),
+              Positioned(
+                right: -8,
+                bottom: -8,
+                child: Transform.rotate(
+                  angle: 0.28,
+                  child: Icon(
+                    icon,
+                    size: 52,
+                    color: Colors.white.withValues(alpha: 0.32),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SpotifyBrowseView extends StatefulWidget {
+  const _SpotifyBrowseView();
+
+  @override
+  State<_SpotifyBrowseView> createState() => _SpotifyBrowseViewState();
+}
+
+class _SpotifyBrowseViewState extends State<_SpotifyBrowseView> {
+  final _searchController = TextEditingController();
+  Timer? _debounce;
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final music = context.watch<MusicController>();
+    final query = _searchController.text.trim().toLowerCase();
+
+    final searchResults = query.isEmpty
+        ? const <Song>[]
+        : music.songs.where((s) {
+            return s.title.toLowerCase().contains(query) ||
+                s.artist.toLowerCase().contains(query) ||
+                music.categoryName(s.categoryId).toLowerCase().contains(query);
+          }).toList();
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+          child: TextField(
+            controller: _searchController,
+            textInputAction: TextInputAction.search,
+            onChanged: (val) {
+              setState(() {});
+              _debounce?.cancel();
+              if (val.trim().isNotEmpty && music.musicProviders.isNotEmpty) {
+                _debounce = Timer(
+                  const Duration(milliseconds: 500),
+                  () => music.searchProvider(val,
+                      providerId: music.musicProviders.first.id),
+                );
+              }
+            },
+            decoration: InputDecoration(
+              hintText: 'What do you want to listen to?',
+              prefixIcon: const Icon(Icons.search_rounded),
+              suffixIcon: query.isNotEmpty
+                  ? IconButton(
+                      icon: const Icon(Icons.clear_rounded),
+                      onPressed: () {
+                        _searchController.clear();
+                        setState(() {});
+                      },
+                    )
+                  : null,
+            ),
+          ),
+        ),
+        Expanded(
+          child: query.isNotEmpty
+              ? (searchResults.isEmpty && music.providerSongs.isEmpty
+                  ? Center(
+                      child: Text(
+                        'No results for "$query"',
+                        style: TextStyle(color: _muted(context)),
+                      ),
+                    )
+                  : ListView(
+                      padding: const EdgeInsets.only(bottom: 80),
+                      children: [
+                        if (searchResults.isNotEmpty) ...[
+                          const Padding(
+                            padding: EdgeInsets.fromLTRB(20, 12, 20, 8),
+                            child: Text(
+                              'Library & Community',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w700, fontSize: 16),
+                            ),
+                          ),
+                          for (final song in searchResults)
+                            SongTile(song: song, queue: searchResults),
+                        ],
+                        if (music.providerSongs.isNotEmpty) ...[
+                          const Padding(
+                            padding: EdgeInsets.fromLTRB(20, 16, 20, 8),
+                            child: Text(
+                              'Online Streams',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w700, fontSize: 16),
+                            ),
+                          ),
+                          for (final song in music.providerSongs)
+                            SongTile(song: song, queue: music.providerSongs),
+                        ],
+                      ],
+                    ))
+              : ListView(
+                  padding: const EdgeInsets.fromLTRB(20, 8, 20, 80),
+                  children: [
+                    const Text(
+                      'Browse Categories',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    GridView.count(
+                      crossAxisCount: 2,
+                      crossAxisSpacing: 12,
+                      mainAxisSpacing: 12,
+                      childAspectRatio: 1.6,
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      children: [
+                        _SpotifyBrowseCard(
+                          title: 'Pop & Hits',
+                          colors: const [Color(0xFF8B5CF6), Color(0xFF6D28D9)],
+                          icon: Icons.trending_up_rounded,
+                          onTap: () {
+                            _searchController.text = 'Pop';
+                            setState(() {});
+                          },
+                        ),
+                        _SpotifyBrowseCard(
+                          title: 'Lo-Fi & Chill',
+                          colors: const [Color(0xFF3B82F6), Color(0xFF1D4ED8)],
+                          icon: Icons.bedtime_rounded,
+                          onTap: () {
+                            _searchController.text = 'Chill';
+                            setState(() {});
+                          },
+                        ),
+                        _SpotifyBrowseCard(
+                          title: 'Hip-Hop',
+                          colors: const [Color(0xFF10B981), Color(0xFF047857)],
+                          icon: Icons.graphic_eq_rounded,
+                          onTap: () {
+                            _searchController.text = 'Hip Hop';
+                            setState(() {});
+                          },
+                        ),
+                        _SpotifyBrowseCard(
+                          title: 'Party Beats',
+                          colors: const [Color(0xFFF59E0B), Color(0xFFD97706)],
+                          icon: Icons.celebration_rounded,
+                          onTap: () {
+                            _searchController.text = 'Party';
+                            setState(() {});
+                          },
+                        ),
+                        _SpotifyBrowseCard(
+                          title: 'Rock & Metal',
+                          colors: const [Color(0xFFEF4444), Color(0xFFB91C1C)],
+                          icon: Icons.bolt_rounded,
+                          onTap: () {
+                            _searchController.text = 'Rock';
+                            setState(() {});
+                          },
+                        ),
+                        _SpotifyBrowseCard(
+                          title: 'Acoustic',
+                          colors: const [Color(0xFFEC4899), Color(0xFFBE185D)],
+                          icon: Icons.favorite_rounded,
+                          onTap: () {
+                            _searchController.text = 'Acoustic';
+                            setState(() {});
+                          },
+                        ),
+                        _SpotifyBrowseCard(
+                          title: 'Bollywood',
+                          colors: const [Color(0xFFA855F7), Color(0xFF7E22CE)],
+                          icon: Icons.radio_rounded,
+                          onTap: () {
+                            _searchController.text = 'Bollywood';
+                            setState(() {});
+                          },
+                        ),
+                        _SpotifyBrowseCard(
+                          title: 'Focus & Study',
+                          colors: const [Color(0xFF06B6D4), Color(0xFF0E7490)],
+                          icon: Icons.auto_stories_rounded,
+                          onTap: () {
+                            _searchController.text = 'Focus';
+                            setState(() {});
+                          },
+                        ),
+                        for (final cat in music.categories)
+                          _SpotifyBrowseCard(
+                            title: cat.name,
+                            colors: const [
+                              Color(0xFF6366F1),
+                              Color(0xFF4338CA)
+                            ],
+                            icon: Icons.music_note_rounded,
+                            onTap: () => _push(
+                              context,
+                              SongListScreen(
+                                title: cat.name,
+                                emptyText: 'No songs in this category.',
+                                select: (m) => m.songsIn(cat.id),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spotify Library View
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _SpotifyLibraryView extends StatelessWidget {
+  const _SpotifyLibraryView();
+
+  @override
+  Widget build(BuildContext context) {
+    final music = context.watch<MusicController>();
+    final scheme = Theme.of(context).colorScheme;
+
+    return ListView(
+      padding: const EdgeInsets.only(bottom: 80),
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 12, 12),
+          child: Row(
+            children: [
+              _Avatar(initials: music.profileInitials, size: 34),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Your Library',
+                  style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.4,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Add category',
+                icon: const Icon(Icons.add_rounded),
+                onPressed: () => _createCategory(context),
+              ),
+            ],
+          ),
+        ),
+
+        // LIKED SONGS HERO ITEM
+        ListTile(
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+          leading: Container(
+            width: 54,
+            height: 54,
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFF8B5CF6), Color(0xFF4C1D95)],
+              ),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Icon(Icons.favorite_rounded,
+                color: Colors.white, size: 26),
+          ),
+          title: const Text(
+            'Liked Songs',
+            style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+          ),
+          subtitle: Text(
+            'Playlist · ${music.likedSongs.length} songs',
+            style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
+          ),
+          onTap: () => _push(
+            context,
+            SongListScreen(
+              title: 'Liked Songs',
+              emptyText: 'Songs you like show up here.',
+              select: (m) => m.likedSongs,
+            ),
+          ),
+        ),
+
+        // DOWNLOADS ITEM
+        ListTile(
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+          leading: Container(
+            width: 54,
+            height: 54,
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF10B981), Color(0xFF064E3B)],
+              ),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Icon(Icons.download_done_rounded,
+                color: Colors.white, size: 26),
+          ),
+          title: const Text(
+            'Downloaded Music',
+            style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+          ),
+          subtitle: Text(
+            'Playlist · ${music.downloadedSongs.length} songs offline',
+            style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
+          ),
+          onTap: () => _push(
+            context,
+            SongListScreen(
+              title: 'Downloads',
+              emptyText: 'No downloaded songs.',
+              select: (m) => m.downloadedSongs,
+            ),
+          ),
+        ),
+
+        // LOCAL DEVICE IMPORTS
+        ListTile(
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+          leading: Container(
+            width: 54,
+            height: 54,
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF3B82F6), Color(0xFF1E3A8A)],
+              ),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Icon(Icons.folder_copy_rounded,
+                color: Colors.white, size: 26),
+          ),
+          title: const Text(
+            'Device Imports',
+            style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+          ),
+          subtitle: Text(
+            'Local files · ${music.savedMedia.length} tracks',
+            style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
+          ),
+          onTap: () => _push(context, const SharedImportScreen(source: '')),
+        ),
+
+        const Padding(
+          padding: EdgeInsets.fromLTRB(20, 16, 20, 8),
+          child: Text(
+            'Playlists & Categories',
+            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+          ),
+        ),
+
+        for (final cat in music.categories)
+          ListTile(
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+            leading: Container(
+              width: 54,
+              height: 54,
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainer,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.queue_music_rounded,
+                  color: NexMusicApp.violet, size: 26),
+            ),
+            title: Text(
+              cat.name,
+              style:
+                  const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+            ),
+            subtitle: Text(
+              'Playlist · ${music.songsIn(cat.id).length} songs',
+              style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
+            ),
+            trailing: IconButton(
+              icon: const Icon(Icons.more_vert_rounded),
+              onPressed: () => _categoryActions(context, cat),
+            ),
+            onTap: () => _push(
+              context,
+              SongListScreen(
+                title: cat.name,
+                emptyText: 'No songs in this category.',
+                select: (m) => m.songsIn(cat.id),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -3006,33 +3796,33 @@ class MiniPlayer extends StatelessWidget {
     if (song == null) return const SizedBox.shrink();
     final music = context.read<MusicController>();
     final scheme = Theme.of(context).colorScheme;
-    return Material(
-      color: scheme.surface,
-      child: SafeArea(
-        top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ValueListenableBuilder<Duration>(
-              valueListenable: music.positionListenable,
-              builder: (_, position, _) {
-                final total = state.duration.inMilliseconds;
-                final value = total <= 0
-                    ? 0.0
-                    : (position.inMilliseconds / total).clamp(0.0, 1.0);
-                return LinearProgressIndicator(
-                  value: value,
-                  minHeight: 2,
-                  backgroundColor: scheme.outlineVariant,
-                );
-              },
-            ),
-            InkWell(
-              onTap: () => _openPlayer(context),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 6, 8, 6),
+    final isLiked = music.isLiked(song);
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
+      child: Material(
+        color: scheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(14),
+        elevation: 6,
+        shadowColor: Colors.black.withValues(alpha: 0.35),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => _openPlayer(context),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
                 child: Row(
                   children: [
+                    _Thumb(
+                      icon: song.isVideo
+                          ? Icons.play_arrow_rounded
+                          : Icons.music_note_rounded,
+                      imageUrl: song.artworkUrl,
+                      size: 44,
+                    ),
+                    const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -3042,22 +3832,43 @@ class MiniPlayer extends StatelessWidget {
                             song.title,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontWeight: FontWeight.w500),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13,
+                            ),
                           ),
+                          const SizedBox(height: 2),
                           Text(
-                            state.category,
+                            song.artist.isNotEmpty
+                                ? song.artist
+                                : state.category,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               color: scheme.onSurfaceVariant,
-                              fontSize: 12,
+                              fontSize: 11,
                             ),
                           ),
                         ],
                       ),
                     ),
+                    if (!song.isProvider)
+                      IconButton(
+                        tooltip: isLiked ? 'Unlike' : 'Like',
+                        iconSize: 20,
+                        onPressed: () => music.toggleLike(song),
+                        icon: Icon(
+                          isLiked
+                              ? Icons.favorite_rounded
+                              : Icons.favorite_border_rounded,
+                          color: isLiked
+                              ? NexMusicApp.violet
+                              : scheme.onSurfaceVariant,
+                        ),
+                      ),
                     IconButton(
                       tooltip: state.playing ? 'Pause' : 'Play',
+                      iconSize: 30,
                       onPressed: music.togglePlay,
                       icon: state.loading
                           ? const SizedBox.square(
@@ -3066,20 +3877,31 @@ class MiniPlayer extends StatelessWidget {
                             )
                           : Icon(
                               state.playing
-                                  ? Icons.pause_rounded
-                                  : Icons.play_arrow_rounded,
+                                  ? Icons.pause_circle_filled_rounded
+                                  : Icons.play_circle_filled_rounded,
+                              color: NexMusicApp.violet,
                             ),
-                    ),
-                    IconButton(
-                      tooltip: 'Next',
-                      onPressed: music.next,
-                      icon: const Icon(Icons.skip_next_rounded),
                     ),
                   ],
                 ),
               ),
-            ),
-          ],
+              ValueListenableBuilder<Duration>(
+                valueListenable: music.positionListenable,
+                builder: (_, position, _) {
+                  final total = state.duration.inMilliseconds;
+                  final value = total <= 0
+                      ? 0.0
+                      : (position.inMilliseconds / total).clamp(0.0, 1.0);
+                  return LinearProgressIndicator(
+                    value: value,
+                    minHeight: 2.5,
+                    backgroundColor: scheme.outlineVariant.withValues(alpha: 0.3),
+                    valueColor: const AlwaysStoppedAnimation(NexMusicApp.violet),
+                  );
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );
