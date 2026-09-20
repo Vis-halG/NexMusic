@@ -27,17 +27,6 @@ bool get _webViewSupported =>
     (defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS);
 
-/// Bumped when a home screen widget asks for the search bar.
-final _searchRequests = ValueNotifier<int>(0);
-const _providerCategoryPrefix = 'provider:';
-
-String _providerCategoryId(String providerId) =>
-    '$_providerCategoryPrefix$providerId';
-
-String? _providerIdFromCategory(String? categoryId) =>
-    categoryId != null && categoryId.startsWith(_providerCategoryPrefix)
-    ? categoryId.substring(_providerCategoryPrefix.length)
-    : null;
 
 Color _muted(BuildContext context) =>
     Theme.of(context).colorScheme.onSurfaceVariant;
@@ -114,7 +103,7 @@ Future<void> _openSongVideo(
         song: videoSong.copyWith(url: url),
         httpHeaders: const {
           'User-Agent':
-              'com.google.android.youtube/19.29.37 (Linux; U; Android 11) gzip',
+              'com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip',
         },
       ),
     );
