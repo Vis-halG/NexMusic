@@ -66,8 +66,8 @@ jobs:
           # Save split outputs
           mkdir -p split_outputs
           cp build/app/outputs/flutter-apk/*.apk split_outputs/
-          # 2. Build universal APK that is compatible with every phone
-          flutter build apk --release --obfuscate --split-debug-info=build/symbols --extra-gen-snapshot-options=--strip
+          # 2. Build universal phone APK (arm + arm64 only, excludes ~9MB of useless PC x86_64)
+          flutter build apk --release --target-platform android-arm,android-arm64 --obfuscate --split-debug-info=build/symbols --extra-gen-snapshot-options=--strip
 
       - name: Prepare release assets
         run: |
