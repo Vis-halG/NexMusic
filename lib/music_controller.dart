@@ -681,21 +681,30 @@ class MusicController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<List<Song>> fetchProviderFeatured(String providerId) async {
+  Future<List<Song>> fetchProviderFeatured(
+    String providerId, {
+    int limit = 20,
+    int page = 1,
+  }) async {
     final provider = _providerById(providerId);
     if (provider == null) return const [];
     try {
-      return await provider.loadFeatured();
+      return await provider.loadFeatured(limit: limit, page: page);
     } catch (_) {
       return const [];
     }
   }
 
-  Future<List<Song>> fetchProviderQuery(String providerId, String query) async {
+  Future<List<Song>> fetchProviderQuery(
+    String providerId,
+    String query, {
+    int limit = 20,
+    int page = 1,
+  }) async {
     final provider = _providerById(providerId);
     if (provider == null) return const [];
     try {
-      return await provider.searchSongs(query);
+      return await provider.searchSongs(query, limit: limit, page: page);
     } catch (_) {
       return const [];
     }

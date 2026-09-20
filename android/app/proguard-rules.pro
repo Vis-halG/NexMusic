@@ -6,6 +6,11 @@
 -dontwarn androidx.media3.exoplayer.rtsp.**
 -dontwarn androidx.media3.exoplayer.smoothstreaming.**
 
+# Preserve audio_service and Android media session classes
+-keep class com.ryanheise.audioservice.** { *; }
+-keep class androidx.media.** { *; }
+-keep class androidx.media3.** { *; }
+
 # Size optimizations for R8
 -repackageclasses ''
 -allowaccessmodification

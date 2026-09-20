@@ -802,12 +802,25 @@ class WelcomeScreen extends StatelessWidget {
               const Spacer(),
               Align(
                 alignment: Alignment.centerLeft,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(14),
-                  child: Image.asset(
-                    'assets/branding/nexmusic-logo.png',
-                    width: 56,
-                    height: 56,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.12),
+                        blurRadius: 10,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  padding: const EdgeInsets.all(3),
+                  child: ClipOval(
+                    child: Image.asset(
+                      'assets/branding/nexmusic-logo.png',
+                      width: 56,
+                      height: 56,
+                    ),
                   ),
                 ),
               ),
@@ -1887,6 +1900,7 @@ class _SpotifyStreamView extends StatefulWidget {
 
 class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
   final _searchController = TextEditingController();
+  final _scrollController = ScrollController();
   String _selectedProvider = 'all'; // 'all', 'jiosaavn', 'ytmusic', 'ytvideo'
   String _selectedCategory = 'Trending';
 
@@ -1907,29 +1921,49 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
   List<Song> _ytVideos = const [];
   List<Song> _searchResults = const [];
   bool _loading = false;
+  bool _loadingMore = false;
+  bool _hasMore = true;
+  int _currentPage = 1;
   Timer? _debounce;
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScroll);
     _loadInitialStreams();
   }
 
   @override
   void dispose() {
     _debounce?.cancel();
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
     _searchController.dispose();
     super.dispose();
   }
 
+  void _onScroll() {
+    if (_scrollController.position.pixels >=
+            _scrollController.position.maxScrollExtent - 350 &&
+        !_loading &&
+        !_loadingMore &&
+        _hasMore) {
+      _loadMore();
+    }
+  }
+
   Future<void> _loadInitialStreams() async {
-    setState(() => _loading = true);
+    setState(() {
+      _loading = true;
+      _currentPage = 1;
+      _hasMore = true;
+    });
     final music = context.read<MusicController>();
     try {
       final futures = await Future.wait([
-        music.fetchProviderFeatured('jiosaavn'),
-        music.fetchProviderFeatured('ytmusic'),
-        music.fetchProviderFeatured('ytvideo'),
+        music.fetchProviderFeatured('jiosaavn', limit: 25),
+        music.fetchProviderFeatured('ytmusic', limit: 25),
+        music.fetchProviderFeatured('ytvideo', limit: 20),
       ]);
       if (!mounted) return;
       setState(() {
@@ -1953,6 +1987,8 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
       _selectedCategory = category;
       _searchController.clear();
       _searchResults = const [];
+      _currentPage = 1;
+      _hasMore = true;
     });
 
     if (category == 'Trending') return;
@@ -1967,8 +2003,8 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
     try {
       final q = '$category hits';
       final results = await Future.wait([
-        music.fetchProviderQuery('jiosaavn', q),
-        music.fetchProviderQuery('ytmusic', q),
+        music.fetchProviderQuery('jiosaavn', q, limit: 20, page: 1),
+        music.fetchProviderQuery('ytmusic', q, limit: 20, page: 1),
       ]);
       if (!mounted) return;
       setState(() {
@@ -1983,6 +2019,71 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
     }
   }
 
+  Future<void> _loadMore() async {
+    if (_loadingMore || !_hasMore) return;
+    setState(() => _loadingMore = true);
+    _currentPage++;
+    final music = context.read<MusicController>();
+    List<Song> newSongs = [];
+    try {
+      final query = _searchController.text.trim();
+      if (query.isNotEmpty) {
+        if (_selectedProvider == 'jiosaavn') {
+          newSongs = await music.fetchProviderQuery('jiosaavn', query, page: _currentPage, limit: 20);
+        } else if (_selectedProvider == 'ytmusic') {
+          newSongs = await music.fetchProviderQuery('ytmusic', query, page: _currentPage, limit: 20);
+        } else if (_selectedProvider == 'ytvideo') {
+          newSongs = await music.fetchProviderQuery('ytvideo', query, page: _currentPage, limit: 20);
+        } else {
+          final res = await Future.wait([
+            music.fetchProviderQuery('jiosaavn', query, page: _currentPage, limit: 12),
+            music.fetchProviderQuery('ytmusic', query, page: _currentPage, limit: 12),
+          ]);
+          newSongs = [...res[0], ...res[1]];
+        }
+      } else if (_selectedCategory != 'Trending') {
+        final q = '$_selectedCategory songs';
+        final res = await Future.wait([
+          music.fetchProviderQuery('jiosaavn', q, page: _currentPage, limit: 15),
+          music.fetchProviderQuery('ytmusic', q, page: _currentPage, limit: 15),
+        ]);
+        newSongs = [...res[0], ...res[1]];
+      } else {
+        final res = await Future.wait([
+          music.fetchProviderQuery('jiosaavn', 'Top Bollywood Trending', page: _currentPage, limit: 15),
+          music.fetchProviderQuery('ytmusic', 'Trending Indian Music', page: _currentPage, limit: 15),
+        ]);
+        newSongs = [...res[0], ...res[1]];
+      }
+    } catch (_) {}
+
+    if (!mounted) return;
+    setState(() {
+      _loadingMore = false;
+      if (newSongs.isEmpty) {
+        _hasMore = false;
+      } else {
+        if (_searchController.text.trim().isNotEmpty) {
+          final existingIds = _searchResults.map((s) => s.id).toSet();
+          final unique = newSongs.where((s) => !existingIds.contains(s.id)).toList();
+          _searchResults = [..._searchResults, ...unique];
+        } else if (_selectedCategory != 'Trending') {
+          final current = _cachedCategories[_selectedCategory] ?? [];
+          final existingIds = current.map((s) => s.id).toSet();
+          final unique = newSongs.where((s) => !existingIds.contains(s.id)).toList();
+          _cachedCategories[_selectedCategory] = [...current, ...unique];
+        } else {
+          final existingJio = _jioTrending.map((s) => s.id).toSet();
+          final existingYt = _ytHits.map((s) => s.id).toSet();
+          final newJio = newSongs.where((s) => s.providerId == 'jiosaavn' && !existingJio.contains(s.id));
+          final newYt = newSongs.where((s) => s.providerId == 'ytmusic' && !existingYt.contains(s.id));
+          _jioTrending = [..._jioTrending, ...newJio];
+          _ytHits = [..._ytHits, ...newYt];
+        }
+      }
+    });
+  }
+
   void _onSearchChanged(String text) {
     _debounce?.cancel();
     final query = text.trim();
@@ -1990,24 +2091,30 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
       setState(() {
         _searchResults = const [];
         _loading = false;
+        _currentPage = 1;
+        _hasMore = true;
       });
       return;
     }
     _debounce = Timer(const Duration(milliseconds: 400), () async {
-      setState(() => _loading = true);
+      setState(() {
+        _loading = true;
+        _currentPage = 1;
+        _hasMore = true;
+      });
       final music = context.read<MusicController>();
       List<Song> results = [];
       try {
         if (_selectedProvider == 'jiosaavn') {
-          results = await music.fetchProviderQuery('jiosaavn', query);
+          results = await music.fetchProviderQuery('jiosaavn', query, limit: 25, page: 1);
         } else if (_selectedProvider == 'ytmusic') {
-          results = await music.fetchProviderQuery('ytmusic', query);
+          results = await music.fetchProviderQuery('ytmusic', query, limit: 25, page: 1);
         } else if (_selectedProvider == 'ytvideo') {
-          results = await music.fetchProviderQuery('ytvideo', query);
+          results = await music.fetchProviderQuery('ytvideo', query, limit: 25, page: 1);
         } else {
           final res = await Future.wait([
-            music.fetchProviderQuery('jiosaavn', query),
-            music.fetchProviderQuery('ytmusic', query),
+            music.fetchProviderQuery('jiosaavn', query, limit: 15, page: 1),
+            music.fetchProviderQuery('ytmusic', query, limit: 15, page: 1),
           ]);
           results = [...res[0], ...res[1]];
         }
@@ -2031,6 +2138,7 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
     final isSearching = _searchController.text.trim().isNotEmpty;
 
     return ListView(
+      controller: _scrollController,
       padding: const EdgeInsets.only(bottom: 90),
       children: [
         // Top Header
@@ -2212,6 +2320,36 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
         else
           // Trending Multi-Section View
           _buildTrendingSections(scheme),
+
+        // Lazy loading more indicator
+        if (_loadingMore)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 24),
+            child: Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: NexMusicApp.violet,
+                    ),
+                  ),
+                  SizedBox(width: 10),
+                  Text(
+                    'Loading more tracks...',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
       ],
     );
   }

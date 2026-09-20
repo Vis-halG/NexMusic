@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -7,7 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'phone_services.dart';
 
 /// Current installed version of NexMusic (matches pubspec.yaml).
-const String currentAppVersion = '0.2.5+4007';
+const String currentAppVersion = '0.2.6+4008';
 
 class AppUpdateInfo {
   const AppUpdateInfo({
@@ -128,20 +129,50 @@ class AppUpdateService {
         return null;
       }
 
-      // Find APK asset
+      // Find matching APK asset for current device ABI (or universal fallback)
       final assets = data['assets'] as List? ?? [];
-      String? apkUrl;
-      var apkSize = 0;
+      String? matchedUrl;
+      int matchedSize = 0;
+      String? universalUrl;
+      int universalSize = 0;
+
+      String targetAbi = '';
+      try {
+        if (Platform.isAndroid) {
+          final abi = Abi.current();
+          if (abi == Abi.androidArm) targetAbi = 'armeabi-v7a';
+          if (abi == Abi.androidArm64) targetAbi = 'arm64-v8a';
+          if (abi == Abi.androidX64) targetAbi = 'x86_64';
+        }
+      } catch (_) {}
+
       for (final asset in assets) {
         if (asset is Map<String, dynamic>) {
-          final name = asset['name'] as String? ?? '';
-          if (name.toLowerCase().endsWith('.apk')) {
-            apkUrl = asset['browser_download_url'] as String?;
-            apkSize = (asset['size'] as num?)?.toInt() ?? 0;
-            break;
+          final name = (asset['name'] as String? ?? '').toLowerCase();
+          if (name.endsWith('.apk')) {
+            final url = asset['browser_download_url'] as String?;
+            final size = (asset['size'] as num?)?.toInt() ?? 0;
+            if (url != null && url.isNotEmpty) {
+              if (targetAbi.isNotEmpty && name.contains(targetAbi)) {
+                matchedUrl = url;
+                matchedSize = size;
+                break; // Exact device ABI match found!
+              } else if (name.contains('universal') ||
+                  name == 'nexmusic.apk' ||
+                  name == 'app-release.apk') {
+                universalUrl = url;
+                universalSize = size;
+              } else if (universalUrl == null) {
+                universalUrl = url;
+                universalSize = size;
+              }
+            }
           }
         }
       }
+
+      final apkUrl = matchedUrl ?? universalUrl;
+      final apkSize = matchedUrl != null ? matchedSize : universalSize;
 
       if (apkUrl == null || apkUrl.isEmpty) {
         debugPrint('Release $tagName found but no APK asset attached');

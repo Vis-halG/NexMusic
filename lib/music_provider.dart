@@ -21,8 +21,8 @@ abstract class MusicProvider {
   String get displayName;
 
   Map<String, String> playbackHeaders(Song song);
-  Future<List<Song>> loadFeatured({int limit = 20});
-  Future<List<Song>> searchSongs(String query, {int limit = 20});
+  Future<List<Song>> loadFeatured({int limit = 20, int page = 1});
+  Future<List<Song>> searchSongs(String query, {int limit = 20, int page = 1});
   Future<String> resolveStreamUrl(Song song);
 }
 
@@ -48,7 +48,7 @@ class JioSaavnProvider implements MusicProvider {
   Map<String, String> playbackHeaders(Song song) => const {};
 
   @override
-  Future<List<Song>> loadFeatured({int limit = 20}) async {
+  Future<List<Song>> loadFeatured({int limit = 20, int page = 1}) async {
     final data = await _fetchJson(_uri({'__call': 'webapi.getLaunchData'}));
     final items = data['new_trending'];
     if (items is! List) return const [];
@@ -62,14 +62,14 @@ class JioSaavnProvider implements MusicProvider {
   }
 
   @override
-  Future<List<Song>> searchSongs(String query, {int limit = 20}) async {
+  Future<List<Song>> searchSongs(String query, {int limit = 20, int page = 1}) async {
     final value = query.trim();
     if (value.isEmpty) return const [];
     final data = await _fetchJson(
       _uri({
         '__call': 'search.getResults',
         'q': value,
-        'p': '1',
+        'p': '$page',
         'n': '${limit.clamp(1, 50)}',
       }),
     );
@@ -216,7 +216,7 @@ class YouTubeMusicProvider implements MusicProvider {
   Map<String, String> playbackHeaders(Song song) => const {};
 
   @override
-  Future<List<Song>> loadFeatured({int limit = 20}) async {
+  Future<List<Song>> loadFeatured({int limit = 20, int page = 1}) async {
     final data = await _postJson(
       Uri.parse(
         'https://music.youtube.com/youtubei/v1/browse'
@@ -257,12 +257,12 @@ class YouTubeMusicProvider implements MusicProvider {
     // Fall back to a regional chart query so the browse tab still opens with
     // immediately playable tracks rather than an empty screen.
     return results.isEmpty
-        ? searchSongs('Top songs India', limit: limit)
+        ? searchSongs('Top songs India', limit: limit, page: page)
         : results;
   }
 
   @override
-  Future<List<Song>> searchSongs(String query, {int limit = 20}) async {
+  Future<List<Song>> searchSongs(String query, {int limit = 20, int page = 1}) async {
     final value = query.trim();
     if (value.isEmpty) return const [];
     final data = await _postJson(
@@ -470,7 +470,7 @@ class YouTubeVideoProvider implements MusicProvider {
   };
 
   @override
-  Future<List<Song>> loadFeatured({int limit = 20}) async {
+  Future<List<Song>> loadFeatured({int limit = 20, int page = 1}) async {
     final data = await _postJson(
       Uri.parse(
         'https://www.youtube.com/youtubei/v1/browse'
@@ -507,7 +507,7 @@ class YouTubeVideoProvider implements MusicProvider {
   }
 
   @override
-  Future<List<Song>> searchSongs(String query, {int limit = 20}) async {
+  Future<List<Song>> searchSongs(String query, {int limit = 20, int page = 1}) async {
     final value = query.trim();
     if (value.isEmpty) return const [];
     final data = await _postJson(

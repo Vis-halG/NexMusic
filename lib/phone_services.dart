@@ -80,6 +80,7 @@ class NexAudioHandler extends BaseAudioHandler with SeekHandler {
       onError: (Object _, StackTrace _) {},
     );
     player.playingStream.listen((_) => _broadcast());
+    _broadcast();
   }
 
   final AudioPlayer player;
@@ -95,13 +96,19 @@ class NexAudioHandler extends BaseAudioHandler with SeekHandler {
           MediaControl.skipToPrevious,
           if (playing) MediaControl.pause else MediaControl.play,
           MediaControl.skipToNext,
+          MediaControl.stop,
         ],
-        systemActions: const {MediaAction.seek},
+        systemActions: const {
+          MediaAction.seek,
+          MediaAction.seekForward,
+          MediaAction.seekBackward,
+        },
         androidCompactActionIndices: const [0, 1, 2],
         processingState: switch (player.processingState) {
           ProcessingState.idle => AudioProcessingState.idle,
           ProcessingState.loading => AudioProcessingState.loading,
-          ProcessingState.buffering => AudioProcessingState.buffering,
+          ProcessingState.buffering =>
+            playing ? AudioProcessingState.ready : AudioProcessingState.buffering,
           ProcessingState.ready => AudioProcessingState.ready,
           ProcessingState.completed => AudioProcessingState.completed,
         },
@@ -114,10 +121,16 @@ class NexAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   @override
-  Future<void> play() => player.play();
+  Future<void> play() async {
+    await player.play();
+    _broadcast();
+  }
 
   @override
-  Future<void> pause() => player.pause();
+  Future<void> pause() async {
+    await player.pause();
+    _broadcast();
+  }
 
   @override
   Future<void> seek(Duration position) => player.seek(position);
@@ -126,6 +139,7 @@ class NexAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> stop() async {
     await player.stop();
     await super.stop();
+    _broadcast();
   }
 
   @override
