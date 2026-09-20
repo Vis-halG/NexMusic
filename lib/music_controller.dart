@@ -371,6 +371,19 @@ class MusicController extends ChangeNotifier {
     } catch (_) {
       _prefs.remove('offlineSongs');
     }
+    try {
+      final streamList =
+          _prefs.getStringList('recent_stream_history') ?? const [];
+      for (final str in streamList) {
+        final decoded = jsonDecode(str);
+        if (decoded is Map<String, dynamic>) {
+          final song = Song.fromJson(decoded);
+          if (song != null) _recentStreamSongs.add(song);
+        }
+      }
+    } catch (_) {
+      _prefs.remove('recent_stream_history');
+    }
     _subs.add(
       _audio.playerStateStream.listen((state) {
         playing = state.playing;
@@ -451,6 +464,21 @@ class MusicController extends ChangeNotifier {
   );
   final Set<String> liked = {};
   final List<String> recentSongIds = [];
+  final List<Song> _recentStreamSongs = [];
+  List<Song> get recentStreamSongs => List.unmodifiable(_recentStreamSongs);
+
+  void _recordStreamSong(Song song) {
+    if (!song.isProvider) return;
+    _recentStreamSongs.removeWhere((s) => s.id == song.id);
+    _recentStreamSongs.insert(0, song);
+    if (_recentStreamSongs.length > 25) {
+      _recentStreamSongs.removeRange(25, _recentStreamSongs.length);
+    }
+    final raw =
+        _recentStreamSongs.map((s) => jsonEncode(s.toJson())).toList();
+    unawaited(_prefs.setStringList('recent_stream_history', raw));
+  }
+
   final Map<String, String> offlinePaths = {};
 
   /// Public songs saved on this device for offline listening, by song id.
@@ -948,7 +976,9 @@ class MusicController extends ChangeNotifier {
       return;
     }
     current = song;
-    if (!song.isPrivate && !song.isProvider) {
+    if (song.isProvider) {
+      _recordStreamSong(song);
+    } else if (!song.isPrivate) {
       recentSongIds
         ..remove(song.id)
         ..insert(0, song.id);
@@ -1002,15 +1032,126 @@ class MusicController extends ChangeNotifier {
     final song = current;
     if (song == null || queue.isEmpty) return;
     if (queue.length == 1) {
+      if (song.isProvider) {
+        try {
+          final radioTracks = await fetchRadioForSong(song, limit: 10);
+          final newTracks = radioTracks.where((t) => t.id != song.id).toList();
+          if (newTracks.isNotEmpty) {
+            queue = [song, ...newTracks];
+            notifyListeners();
+            await play(queue[1], from: queue);
+            return;
+          }
+        } catch (_) {}
+      }
       await _audio.seek(Duration.zero);
       await _audio.pause();
       return;
     }
     final index = queue.indexWhere((item) => item.id == song.id);
+    if (!shuffle && index >= queue.length - 1 && song.isProvider) {
+      try {
+        final radioTracks = await fetchRadioForSong(song, limit: 10);
+        final existingIds = queue.map((s) => s.id).toSet();
+        final newTracks =
+            radioTracks.where((t) => !existingIds.contains(t.id)).toList();
+        if (newTracks.isNotEmpty) {
+          queue = [...queue, ...newTracks];
+          notifyListeners();
+          await play(queue[index + 1], from: queue);
+          return;
+        }
+      } catch (_) {}
+    }
     final nextIndex = shuffle
         ? _shuffledIndex(index)
         : (index + 1) % queue.length;
     await play(queue[nextIndex], from: queue);
+  }
+
+  // ── YouTube Music Recommendations & Radio ─────────────────────────────────
+
+  /// Fetches official YouTube Music radio recommendations for [song].
+  Future<List<Song>> fetchRadioForSong(Song song, {int limit = 25}) async {
+    final yt = _musicProviders.whereType<YouTubeMusicProvider>().firstOrNull ??
+        _musicProviders.firstWhere(
+          (p) => p.id == 'ytmusic',
+          orElse: () => _musicProviders.first,
+        );
+
+    if (song.providerId == 'ytmusic' || song.providerId == 'ytvideo') {
+      final radio = await yt.loadRadio(song.sourceId, limit: limit);
+      if (radio.isNotEmpty) return radio;
+    }
+
+    try {
+      final query = '${song.title} ${song.artist}'.trim();
+      final results = await yt.searchSongs(query, limit: 1);
+      if (results.isNotEmpty) {
+        final radio = await yt.loadRadio(results.first.sourceId, limit: limit);
+        if (radio.isNotEmpty) return radio;
+      }
+    } catch (_) {}
+
+    return fetchProviderQuery('ytmusic', '${song.artist} songs', limit: limit);
+  }
+
+  /// Plays [song] and loads YouTube Music Radio recommendations into the queue.
+  Future<void> startRadio(Song song) async {
+    await play(song);
+    try {
+      final radioTracks = await fetchRadioForSong(song, limit: 30);
+      final filtered = radioTracks.where((t) => t.id != song.id).toList();
+      if (filtered.isNotEmpty) {
+        queue = [song, ...filtered];
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint('startRadio error: $e');
+    }
+  }
+
+  /// Returns songs similar to the user's last played stream track.
+  Future<({String title, String artist, Song seedSong, List<Song> songs})?>
+      fetchSimilarToLastPlayed({int limit = 20}) async {
+    final seed = (current != null && current!.isProvider)
+        ? current!
+        : (_recentStreamSongs.isNotEmpty ? _recentStreamSongs.first : null);
+
+    if (seed == null) return null;
+
+    final radio = await fetchRadioForSong(seed, limit: limit);
+    final filtered = radio.where((s) => s.id != seed.id).toList();
+    if (filtered.isEmpty) return null;
+
+    return (
+      title: seed.title,
+      artist: seed.artist.isNotEmpty ? seed.artist : 'Your taste',
+      seedSong: seed,
+      songs: filtered,
+    );
+  }
+
+  /// Builds a personalized Quick Picks list based on recent stream tracks,
+  /// falling back to YouTube Music trending home tracks.
+  Future<List<Song>> fetchQuickPicks({int limit = 20}) async {
+    if (_recentStreamSongs.isNotEmpty) {
+      final sample = _recentStreamSongs.take(3).toList();
+      final futures = sample.map((s) => fetchRadioForSong(s, limit: 8));
+      final candidateLists = await Future.wait(futures);
+      final combined = <Song>[];
+      final seen = <String>{};
+      for (final list in candidateLists) {
+        for (final song in list) {
+          if (seen.add(song.id)) combined.add(song);
+        }
+      }
+      if (combined.isNotEmpty) {
+        combined.shuffle();
+        return combined.take(limit).toList();
+      }
+    }
+    return fetchProviderFeatured('ytmusic', limit: limit);
   }
 
   Future<void> previous() async {

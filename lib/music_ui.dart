@@ -721,12 +721,14 @@ class _NavRow extends StatelessWidget {
   const _NavRow({
     required this.icon,
     required this.title,
+    this.subtitle,
     required this.onTap,
     this.trailing,
     this.showChevron = true,
   });
   final IconData icon;
   final String title;
+  final String? subtitle;
   final String? trailing;
   final bool showChevron;
   final VoidCallback onTap;
@@ -735,6 +737,12 @@ class _NavRow extends StatelessWidget {
   Widget build(BuildContext context) => ListTile(
     leading: Icon(icon),
     title: Text(title),
+    subtitle: subtitle != null
+        ? Text(
+            subtitle!,
+            style: TextStyle(color: _muted(context), fontSize: 12),
+          )
+        : null,
     trailing: Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -1105,13 +1113,13 @@ class _MusicShellState extends State<MusicShell> {
         case 'upload':
           _push(context, const UploadScreen());
         case 'search':
-          setState(() => _currentTabIndex = 2);
+          _push(context, const SearchScreen());
         case 'browser':
           if (_webViewSupported) {
             _push(context, const NexBrowserScreen(sharedLink: ''));
           }
         case 'downloads':
-          setState(() => _currentTabIndex = 3);
+          setState(() => _currentTabIndex = 2);
       }
     });
   }
@@ -1145,8 +1153,8 @@ class _MusicShellState extends State<MusicShell> {
 
     final Widget currentView = switch (_currentTabIndex) {
       1 => const _SpotifyStreamView(),
-      2 => const _SpotifyBrowseView(),
-      3 => const _SpotifyLibraryView(),
+      2 => const _SpotifyLibraryView(),
+      3 => const ProfileScreen(showAppBar: false),
       _ => const _SpotifyHomeView(),
     };
 
@@ -1185,18 +1193,20 @@ class _MusicShellState extends State<MusicShell> {
                 label: 'Stream',
               ),
               NavigationDestination(
-                icon: Icon(Icons.search_rounded),
-                selectedIcon:
-                    Icon(Icons.search_rounded, color: NexMusicApp.violet),
-                label: 'Search',
-              ),
-              NavigationDestination(
                 icon: Icon(Icons.library_music_outlined),
                 selectedIcon: Icon(
                   Icons.library_music_rounded,
                   color: NexMusicApp.violet,
                 ),
-                label: 'Your Library',
+                label: 'Library',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.person_outline_rounded),
+                selectedIcon: Icon(
+                  Icons.person_rounded,
+                  color: NexMusicApp.violet,
+                ),
+                label: 'Profile',
               ),
             ],
           ),
@@ -1288,7 +1298,7 @@ class _SpotifySongCard extends StatelessWidget {
                       ? Image.network(
                           song.artworkUrl,
                           fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) => _fallback(scheme),
+                          errorBuilder: (_, _, _) => _fallback(scheme),
                         )
                       : _fallback(scheme),
                 ),
@@ -1389,14 +1399,12 @@ class _SpotifyQuickTile extends StatelessWidget {
     required this.title,
     required this.icon,
     this.gradient,
-    this.imageUrl,
     required this.onTap,
   });
 
   final String title;
   final IconData icon;
   final Gradient? gradient;
-  final String? imageUrl;
   final VoidCallback onTap;
 
   @override
@@ -1422,14 +1430,7 @@ class _SpotifyQuickTile extends StatelessWidget {
                       ],
                     ),
               ),
-              child: imageUrl != null && imageUrl!.isNotEmpty
-                  ? Image.network(
-                      imageUrl!,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) =>
-                          Icon(icon, color: Colors.white, size: 24),
-                    )
-                  : Icon(icon, color: Colors.white, size: 24),
+              child: Icon(icon, color: Colors.white, size: 24),
             ),
             const SizedBox(width: 10),
             Expanded(
@@ -1545,7 +1546,7 @@ class _SpotifySection extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 20),
             scrollDirection: Axis.horizontal,
             itemCount: songs.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 14),
+            separatorBuilder: (_, _) => const SizedBox(width: 14),
             itemBuilder: (_, i) => _SpotifySongCard(
               song: songs[i],
               queue: songs,
@@ -1616,14 +1617,14 @@ class _SpotifyHomeViewState extends State<_SpotifyHomeView> {
                     ),
                   ),
                   IconButton(
+                    tooltip: 'Search',
+                    onPressed: () => _push(context, const SearchScreen()),
+                    icon: const Icon(Icons.search_rounded, size: 26),
+                  ),
+                  IconButton(
                     tooltip: 'Upload song',
                     onPressed: () => _push(context, const UploadScreen()),
                     icon: const Icon(Icons.add_circle_outline_rounded),
-                  ),
-                  IconButton(
-                    tooltip: 'Profile',
-                    onPressed: () => _push(context, const ProfileScreen()),
-                    icon: _Avatar(initials: music.profileInitials, size: 32),
                   ),
                 ],
               ),
@@ -2018,18 +2019,25 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
 
   static const _categories = [
     'Trending',
+    'Quick Picks',
+    'Energize',
+    'Relax',
+    'Workout',
+    'Focus',
+    'Party',
+    'Romance',
+    'Feel-Good',
     'Bollywood',
     'Punjabi',
     'Lo-Fi',
-    'Pop',
-    'Workout',
-    'Rock',
-    'Devotional',
   ];
 
   final Map<String, List<Song>> _cachedCategories = {};
   List<Song> _jioTrending = const [];
   List<Song> _ytHits = const [];
+  List<Song> _quickPicks = const [];
+  ({String title, String artist, Song seedSong, List<Song> songs})?
+      _similarSection;
   List<Song> _searchResults = const [];
   bool _loading = false;
   bool _loadingMore = false;
@@ -2074,15 +2082,25 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
       final futures = await Future.wait([
         music.fetchProviderFeatured('jiosaavn', limit: 25),
         music.fetchProviderFeatured('ytmusic', limit: 25),
+        music.fetchQuickPicks(limit: 16),
+        music.fetchSimilarToLastPlayed(limit: 16),
       ]);
       if (!mounted) return;
       setState(() {
-        _jioTrending = futures[0];
-        _ytHits = futures[1];
+        _jioTrending = futures[0] as List<Song>;
+        _ytHits = futures[1] as List<Song>;
+        _quickPicks = futures[2] as List<Song>;
+        _similarSection = futures[3] as ({
+          String title,
+          String artist,
+          Song seedSong,
+          List<Song> songs
+        })?;
         _cachedCategories['Trending'] = [
-          ...futures[0],
-          ...futures[1],
+          ..._jioTrending,
+          ..._ytHits,
         ];
+        _cachedCategories['Quick Picks'] = _quickPicks;
         _loading = false;
       });
     } catch (_) {
@@ -2101,6 +2119,24 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
 
     if (category == 'Trending') return;
 
+    if (category == 'Quick Picks') {
+      if (_quickPicks.isEmpty) {
+        setState(() => _loading = true);
+        final music = context.read<MusicController>();
+        final qp = await music.fetchQuickPicks(limit: 24);
+        if (mounted) {
+          setState(() {
+            _quickPicks = qp;
+            _cachedCategories['Quick Picks'] = qp;
+            _loading = false;
+          });
+        }
+      } else {
+        _cachedCategories['Quick Picks'] = _quickPicks;
+      }
+      return;
+    }
+
     if (_cachedCategories.containsKey(category) &&
         _cachedCategories[category]!.isNotEmpty) {
       return;
@@ -2111,8 +2147,8 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
     try {
       final q = '$category hits';
       final results = await Future.wait([
-        music.fetchProviderQuery('jiosaavn', q, limit: 20, page: 1),
         music.fetchProviderQuery('ytmusic', q, limit: 20, page: 1),
+        music.fetchProviderQuery('jiosaavn', q, limit: 20, page: 1),
       ]);
       if (!mounted) return;
       setState(() {
@@ -2410,7 +2446,7 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 20),
                 itemCount: _categories.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                separatorBuilder: (_, _) => const SizedBox(width: 8),
                 itemBuilder: (context, index) {
                   final cat = _categories[index];
                   final isSelected = _selectedCategory == cat;
@@ -2628,24 +2664,190 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
     );
   }
 
+  Widget _buildQuickPicksSection(ColorScheme scheme) {
+    if (_quickPicks.isEmpty) return const SizedBox.shrink();
+    final music = context.read<MusicController>();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 16, 10),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(4),
+                          decoration: BoxDecoration(
+                            color: Colors.redAccent.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: const Icon(
+                            Icons.auto_awesome_rounded,
+                            size: 16,
+                            color: Colors.redAccent,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'Quick Picks',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: -0.3,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Start radio based on your taste',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              FilledButton.tonalIcon(
+                style: FilledButton.styleFrom(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: () {
+                  if (_quickPicks.isNotEmpty) {
+                    music.startRadio(_quickPicks.first);
+                  }
+                },
+                icon: const Icon(Icons.radio_rounded, size: 16),
+                label: const Text('Start Radio', style: TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+        ),
+        SizedBox(
+          height: 230,
+          child: ListView.builder(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            scrollDirection: Axis.horizontal,
+            itemCount: (_quickPicks.length / 4).ceil(),
+            itemBuilder: (context, colIndex) {
+              final startIndex = colIndex * 4;
+              final colSongs = _quickPicks.skip(startIndex).take(4).toList();
+              return SizedBox(
+                width: MediaQuery.of(context).size.width * 0.84,
+                child: Column(
+                  children: [
+                    for (final song in colSongs)
+                      Expanded(
+                        child: _QuickPickTile(
+                          song: song,
+                          queue: _quickPicks,
+                        ),
+                      ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSimilarSection(ColorScheme scheme) {
+    final sim = _similarSection;
+    if (sim == null || sim.songs.isEmpty) return const SizedBox.shrink();
+    final music = context.read<MusicController>();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 16, 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.graphic_eq_rounded,
+                          size: 18,
+                          color: NexMusicApp.violet,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Similar to ${sim.title}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: -0.3,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Radio based on ${sim.artist.isNotEmpty ? sim.artist : sim.title}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: 'Start Radio',
+                icon: const Icon(Icons.radio_rounded, color: NexMusicApp.violet),
+                onPressed: () => music.startRadio(sim.seedSong),
+              ),
+            ],
+          ),
+        ),
+        SizedBox(
+          height: 195,
+          child: ListView.separated(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            scrollDirection: Axis.horizontal,
+            itemCount: sim.songs.length,
+            separatorBuilder: (_, _) => const SizedBox(width: 14),
+            itemBuilder: (_, i) => _SpotifySongCard(
+              song: sim.songs[i],
+              queue: sim.songs,
+              width: 142,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildTrendingSections(ColorScheme scheme) {
     final jio = _filterByProvider(_jioTrending);
     final yt = _filterByProvider(_ytHits);
 
-    if (_selectedProvider != 'all') {
-      final currentList = switch (_selectedProvider) {
-        'jiosaavn' => jio,
-        'ytmusic' => yt,
-        _ => <Song>[],
-      };
-      final providerName = switch (_selectedProvider) {
-        'jiosaavn' => 'JioSaavn',
-        'ytmusic' => 'YouTube Music',
-        _ => '',
-      };
-      if (currentList.isEmpty) {
-        return const SizedBox.shrink();
-      }
+    if (_selectedProvider == 'jiosaavn') {
+      if (jio.isEmpty) return const SizedBox.shrink();
       return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 20),
         child: Column(
@@ -2654,7 +2856,7 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: Text(
-                '$providerName Tracks (${currentList.length})',
+                'JioSaavn Tracks (${jio.length})',
                 style: const TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.w700,
@@ -2664,7 +2866,7 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
             GridView.builder(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              itemCount: currentList.length,
+              itemCount: jio.length,
               gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                 crossAxisCount: 2,
                 mainAxisSpacing: 14,
@@ -2673,8 +2875,8 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
               ),
               itemBuilder: (context, index) {
                 return _SpotifySongCard(
-                  song: currentList[index],
-                  queue: currentList,
+                  song: jio[index],
+                  queue: jio,
                 );
               },
             ),
@@ -2683,9 +2885,53 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
       );
     }
 
+    if (_selectedProvider == 'ytmusic') {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildQuickPicksSection(scheme),
+          _buildSimilarSection(scheme),
+          if (yt.isNotEmpty) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+              child: Text(
+                'YouTube Music Hot Tracks (${yt.length})',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: yt.length,
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  mainAxisSpacing: 14,
+                  crossAxisSpacing: 14,
+                  childAspectRatio: 0.72,
+                ),
+                itemBuilder: (context, index) {
+                  return _SpotifySongCard(
+                    song: yt[index],
+                    queue: yt,
+                  );
+                },
+              ),
+            ),
+          ],
+        ],
+      );
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        _buildQuickPicksSection(scheme),
+        _buildSimilarSection(scheme),
         if (jio.isNotEmpty)
           _SpotifySection(
             title: 'JioSaavn Trending Hits',
@@ -2699,6 +2945,131 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
             songs: yt,
           ),
       ],
+    );
+  }
+}
+
+class _QuickPickTile extends StatelessWidget {
+  const _QuickPickTile({
+    required this.song,
+    required this.queue,
+  });
+
+  final Song song;
+  final List<Song> queue;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final isCurrent = context.select<MusicController, bool>(
+      (m) => m.current?.id == song.id,
+    );
+    final isPlaying = context.select<MusicController, bool>(
+      (m) => m.playing && isCurrent,
+    );
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: () => _openSong(context, song, queue: queue),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: Container(
+                width: 44,
+                height: 44,
+                color: scheme.surfaceContainerHighest,
+                child: song.artworkUrl.isNotEmpty
+                    ? Image.network(
+                        song.artworkUrl,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) => Icon(
+                          song.isVideo
+                              ? Icons.play_arrow_rounded
+                              : Icons.music_note_rounded,
+                          color: NexMusicApp.violet,
+                          size: 20,
+                        ),
+                      )
+                    : Icon(
+                        song.isVideo
+                            ? Icons.play_arrow_rounded
+                            : Icons.music_note_rounded,
+                        color: NexMusicApp.violet,
+                        size: 20,
+                      ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    song.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: isCurrent ? NexMusicApp.violet : scheme.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    song.artist.isNotEmpty ? song.artist : 'YouTube Music',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (isCurrent)
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: Icon(
+                  isPlaying
+                      ? Icons.graphic_eq_rounded
+                      : Icons.play_arrow_rounded,
+                  size: 18,
+                  color: NexMusicApp.violet,
+                ),
+              ),
+            IconButton(
+              icon: const Icon(Icons.more_vert_rounded, size: 18),
+              tooltip: 'More',
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              onPressed: () => _songActions(context, song),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class SearchScreen extends StatelessWidget {
+  const SearchScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Search'),
+        elevation: 0,
+      ),
+      body: const SafeArea(
+        child: _SpotifyBrowseView(),
+      ),
     );
   }
 }
@@ -3189,6 +3560,15 @@ Future<void> _songActions(BuildContext context, Song song) {
     context,
     title: song.title,
     (sheetContext) => [
+      ListTile(
+        leading: const Icon(Icons.radio_rounded, color: NexMusicApp.violet),
+        title: const Text('Start Radio'),
+        subtitle: const Text('Play similar recommended tracks like this'),
+        onTap: () {
+          Navigator.pop(sheetContext);
+          music.startRadio(song);
+        },
+      ),
       if (!song.isProvider)
         ListTile(
           leading: Icon(
@@ -5212,16 +5592,30 @@ class _VideoScreenState extends State<VideoScreen> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class ProfileScreen extends StatelessWidget {
-  const ProfileScreen({super.key});
+  const ProfileScreen({super.key, this.showAppBar = true});
+  final bool showAppBar;
 
   @override
   Widget build(BuildContext context) {
     final music = context.watch<MusicController>();
-    return Scaffold(
-      appBar: AppBar(title: const Text('You')),
-      body: ListView(
-        padding: const EdgeInsets.only(bottom: 32),
-        children: [
+    final content = ListView(
+      padding: EdgeInsets.only(
+        top: showAppBar ? 0 : 16,
+        bottom: 32,
+      ),
+      children: [
+        if (!showAppBar)
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 10, 20, 12),
+            child: Text(
+              'Profile',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.4,
+              ),
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
             child: Row(
@@ -5320,8 +5714,9 @@ class ProfileScreen extends StatelessWidget {
           ),
           if (_webViewSupported)
             _NavRow(
-              icon: Icons.language_rounded,
-              title: 'Browser',
+              icon: Icons.travel_explore_rounded,
+              title: 'Advanced Web Browser',
+              subtitle: 'Full browsing control, ad blocker & media downloader',
               onTap: () =>
                   _push(context, const NexBrowserScreen(sharedLink: '')),
             ),
@@ -5364,7 +5759,13 @@ class ProfileScreen extends StatelessWidget {
             ),
           ),
         ],
-      ),
+      );
+    if (!showAppBar) {
+      return SafeArea(child: content);
+    }
+    return Scaffold(
+      appBar: AppBar(title: const Text('You')),
+      body: content,
     );
   }
 }
@@ -6400,6 +6801,16 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
   bool _downloading = false;
   String? _currentPage, _userAgent;
 
+  // Navigation and browser control states
+  bool _canGoBack = false;
+  bool _canGoForward = false;
+  bool _autoOpenTopResult = false; // User chooses whether to auto-pick or click manually!
+  bool _allowCrossDomain = true; // User can freely browse any website!
+  bool _blockAds = true; // Blocks aggressive popups and redirect ads
+  bool _isDesktopMode = false;
+  bool _showSmartBar = true; // Floating converter helper bar
+  double _zoomLevel = 1.0;
+
   /// Main-frame URLs requested without a page starting. The Android WebView
   /// hands a file download back as a repeat request for the same URL.
   final Map<String, int> _unstarted = {};
@@ -6414,51 +6825,62 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
   bool _ready = false;
   bool _busy = false;
 
-  /// How far the listener has got with this site. It only ever moves
-  /// forward, and a tap moves it at once, so reading the page can never throw
-  /// the button back to an earlier step or jump it ahead to a later one.
+  /// How far the listener has got with this site.
   _BrowserStep _phase = _BrowserStep.paste;
 
   /// Readings in a row where a converting site reported neither work in
-  /// progress nor a file, so the button can be put back rather than stick.
+  /// progress nor a file.
   int _idleReads = 0;
 
-  /// Adverts that took the place of the file. These sites throw one up on the
-  /// first press of their own download button, so a couple of presses are
-  /// tried before giving up.
+  /// Adverts that took the place of the file.
   int _adRetries = 0;
 
-  /// When the listener last asked for the file. An advert opened in its place
-  /// counts as part of that request, however the page's own buttons flicker
-  /// while it happens.
+  /// When the listener last asked for the file.
   DateTime? _downloadTapAt;
 
-  /// True once the top search result has been opened for a shared link, so
-  /// coming back to the search page leaves the choice to the listener.
+  /// True once the top search result has been opened for a shared link.
   bool _topResultOpened = false;
   bool _findingTopResult = false;
 
-  /// Presses the app has made by itself on this page, per step, so a site
-  /// that will not respond is left to the listener after a few tries.
+  /// Presses the app has made by itself on this page, per step.
   final Map<_BrowserStep, int> _autoTries = {};
   DateTime? _lastAutoAt;
 
-  /// True once a file has started coming from this page, so coming back from
-  /// the upload screen does not fetch it a second time.
+  /// True once a file has started coming from this page.
   bool _fileTaken = false;
   bool _working = false;
 
-  /// True while a page is still on its way in, so the button says so instead
-  /// of offering an action read off the page being replaced.
+  /// True while a page is still on its way in.
   bool _loading = false;
 
-  /// Counts page loads, so a reading that began on an earlier page is thrown
-  /// away rather than believed.
+  /// Counts page loads.
   int _pageRun = 0;
 
-  /// Re-reads the open site's buttons, because a converter swaps Convert for
-  /// Download without ever loading another page.
+  /// Re-reads the open site's buttons.
   Timer? _actionTimer;
+
+  static bool _isAdHost(String host) {
+    final lower = host.toLowerCase();
+    const adKeywords = [
+      'doubleclick.',
+      'googleadservices.',
+      'googlesyndication.',
+      'adsterra.',
+      'popcash.',
+      'popads.',
+      'propellerads.',
+      'exoclick.',
+      'betting',
+      'casino',
+      '1xbet',
+      'adkeep',
+      'trafficjunky',
+      'adnxs.',
+      'onclickmega',
+      'yllix',
+    ];
+    return adKeywords.any((k) => lower.contains(k));
+  }
 
   @override
   void initState() {
@@ -6524,45 +6946,72 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
               }
               return NavigationDecision.prevent;
             }
-            if (!request.isMainFrame) return NavigationDecision.navigate;
-            if (_siteOpen && !_loading && uploadKindFor(uri.path) == null) {
-              // These sites open an advert on the first press of their own
-              // download button, and their pages carry links back to YouTube.
-              // Staying on the converter keeps the file within reach instead
-              // of losing the page. A file, or the site's own delivery host,
-              // still gets through.
-              String base(String host) {
-                final parts = host.toLowerCase().split('.');
-                if (parts.length < 2) return host.toLowerCase();
-                return parts.sublist(parts.length - 2).join('.');
-              }
-
-              final here = Uri.tryParse(_currentPage ?? '')?.host ?? '';
-              if (here.isNotEmpty && base(here) != base(uri.host)) {
-                // A converter normally serves the finished file from a CDN,
-                // which is also a different host. Try the URL as media first
-                // instead of rejecting every cross-host request as an advert.
-                // If it is HTML, keep this page open and retry the converter's
-                // button; that preserves the advert protection.
-                final asked = _downloadTapAt;
-                final wantsFile =
-                    asked != null &&
-                    DateTime.now().difference(asked) <
-                        const Duration(seconds: 20);
-                if (wantsFile) {
-                  unawaited(_saveDownload(uri, keepConverterOnWebPage: true));
-                } else {
-                  _snack(
-                    'That link led away from the converter; it was blocked.',
-                  );
-                }
+            if (!request.isMainFrame) {
+              if (_blockAds && _isAdHost(uri.host)) {
                 return NavigationDecision.prevent;
               }
+              return NavigationDecision.navigate;
             }
+
+            if (widget.job != null) {
+              // Headless background job keeps strict converter lock
+              if (_siteOpen && !_loading && uploadKindFor(uri.path) == null) {
+                String base(String host) {
+                  final parts = host.toLowerCase().split('.');
+                  if (parts.length < 2) return host.toLowerCase();
+                  return parts.sublist(parts.length - 2).join('.');
+                }
+
+                final here = Uri.tryParse(_currentPage ?? '')?.host ?? '';
+                if (here.isNotEmpty && base(here) != base(uri.host)) {
+                  final asked = _downloadTapAt;
+                  final wantsFile = asked != null &&
+                      DateTime.now().difference(asked) <
+                          const Duration(seconds: 20);
+                  if (wantsFile) {
+                    unawaited(_saveDownload(uri, keepConverterOnWebPage: true));
+                  }
+                  return NavigationDecision.prevent;
+                }
+              }
+            } else {
+              // Interactive user browser:
+              if (_blockAds && _isAdHost(uri.host)) {
+                _snack('Redirect ad blocked: ${uri.host}');
+                return NavigationDecision.prevent;
+              }
+              // If cross domain is disabled manually:
+              if (!_allowCrossDomain &&
+                  _siteOpen &&
+                  !_loading &&
+                  uploadKindFor(uri.path) == null) {
+                String base(String host) {
+                  final parts = host.toLowerCase().split('.');
+                  if (parts.length < 2) return host.toLowerCase();
+                  return parts.sublist(parts.length - 2).join('.');
+                }
+
+                final here = Uri.tryParse(_currentPage ?? '')?.host ?? '';
+                if (here.isNotEmpty && base(here) != base(uri.host)) {
+                  final asked = _downloadTapAt;
+                  final wantsFile = asked != null &&
+                      DateTime.now().difference(asked) <
+                          const Duration(seconds: 20);
+                  if (wantsFile) {
+                    unawaited(_saveDownload(uri, keepConverterOnWebPage: true));
+                  } else {
+                    _snack(
+                      'That link led away from the converter; it was blocked.',
+                    );
+                  }
+                  return NavigationDecision.prevent;
+                }
+              }
+            }
+
             final attempts = _unstarted[request.url] =
                 (_unstarted[request.url] ?? 0) + 1;
             if (attempts > 3) {
-              // The link keeps bouncing between page and download; stop it.
               _snack('This link could not be opened or downloaded.');
               return NavigationDecision.prevent;
             }
@@ -6577,7 +7026,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     final incoming = widget.sharedLink.trim();
     if (incoming.isEmpty) {
       _browser.loadHtmlString(_startPage);
-      WidgetsBinding.instance.addPostFrameCallback((_) => _showQuickPanel());
     } else {
       unawaited(_go(incoming));
     }
@@ -6589,15 +7037,88 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
 <head>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    body { margin:0; min-height:100vh; display:grid; place-items:center;
-      font-family:Roboto,Arial,sans-serif; color:#0a0a0a; background:#fff; }
-    main { text-align:center; padding:32px; }
-    h1 { margin:0 0 8px; font-size:20px; font-weight:600; }
-    p { margin:0; color:#71717a; line-height:1.5; font-size:14px; }
+    :root {
+      --bg: #09090b;
+      --card: #18181b;
+      --border: #27272a;
+      --text: #f4f4f5;
+      --sub: #a1a1aa;
+      --accent: #8b5cf6;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f8fafc;
+        --card: #ffffff;
+        --border: #e2e8f0;
+        --text: #0f172a;
+        --sub: #64748b;
+        --accent: #7c3aed;
+      }
+    }
+    body {
+      margin: 0; min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 24px; box-sizing: border-box;
+    }
+    .brand {
+      display: flex; align-items: center; gap: 12px; margin-bottom: 20px;
+    }
+    .logo-badge {
+      width: 46px; height: 46px; border-radius: 12px;
+      background: linear-gradient(135deg, #8b5cf6, #6366f1);
+      display: grid; place-items: center; color: white; font-size: 22px; font-weight: 700;
+    }
+    h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+    p { margin: 6px 0 24px; color: var(--sub); font-size: 13px; text-align: center; max-width: 320px; line-height: 1.4; }
+    .grid {
+      display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; width: 100%; max-width: 360px;
+    }
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+      padding: 12px; text-decoration: none; color: inherit; display: flex; align-items: center; gap: 10px;
+      transition: transform 0.1s, border-color 0.1s;
+    }
+    .card:active { transform: scale(0.97); }
+    .icon {
+      width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; font-size: 16px;
+    }
+    .c-yt { background: #fee2e2; color: #dc2626; }
+    .c-mp3 { background: #ede9fe; color: #7c3aed; }
+    .c-ggl { background: #e0f2fe; color: #0284c7; }
+    .c-sc { background: #ffedd5; color: #ea580c; }
+    .title { font-weight: 600; font-size: 13px; line-height: 1.2; }
+    .desc { font-size: 11px; color: var(--sub); margin-top: 2px; }
   </style>
 </head>
-<body><main><h1>Browser</h1>
-<p>Search, paste a link, or open YouTube.</p></main></body>
+<body>
+  <div class="brand">
+    <div class="logo-badge">⚡</div>
+    <div>
+      <h1>NexBrowser Pro</h1>
+    </div>
+  </div>
+  <p>Search freely, choose any website to click, or convert online media into NexMusic.</p>
+  <div class="grid">
+    <a class="card" href="https://www.google.com">
+      <div class="icon c-ggl">🔍</div>
+      <div><div class="title">Google</div><div class="desc">Web search</div></div>
+    </a>
+    <a class="card" href="https://m.youtube.com">
+      <div class="icon c-yt">▶</div>
+      <div><div class="title">YouTube</div><div class="desc">Music & videos</div></div>
+    </a>
+    <a class="card" href="https://www.google.com/search?q=youtube+to+mp3+converter">
+      <div class="icon c-mp3">🎵</div>
+      <div><div class="title">MP3 Converters</div><div class="desc">Choose site</div></div>
+    </a>
+    <a class="card" href="https://m.soundcloud.com">
+      <div class="icon c-sc">☁</div>
+      <div><div class="title">SoundCloud</div><div class="desc">Audio streams</div></div>
+    </a>
+  </div>
+</body>
 </html>
 ''';
 
@@ -6622,10 +7143,81 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     await _browser.loadRequest(destination);
   }
 
+  void _goHome() {
+    _addressController.clear();
+    _currentPage = '';
+    _browser.loadHtmlString(_startPage);
+  }
+
+  Future<void> _toggleDesktopMode(bool enable) async {
+    setState(() => _isDesktopMode = enable);
+    const desktopUa =
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+    const mobileUa =
+        'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36';
+    await _browser.setUserAgent(enable ? desktopUa : mobileUa);
+    await _browser.reload();
+  }
+
+  void _changeZoom(double delta) {
+    final next = (_zoomLevel + delta).clamp(0.5, 2.5);
+    setState(() => _zoomLevel = double.parse(next.toStringAsFixed(2)));
+    _browser.runJavaScript('document.body.style.zoom = "$_zoomLevel";');
+  }
+
+  void _resetZoom() {
+    setState(() => _zoomLevel = 1.0);
+    _browser.runJavaScript('document.body.style.zoom = "1.0";');
+  }
+
+  Future<void> _clearBrowsingData() async {
+    await _browser.clearCache();
+    await WebViewCookieManager().clearCookies();
+    _snack('Browser cache & cookies cleared');
+  }
+
+  Future<void> _captureMediaFromPage() async {
+    final current = _currentPage;
+    if (current == null || current.isEmpty) return;
+    final uri = Uri.tryParse(current);
+    if (uri == null) return;
+    _snack('Scanning page for downloadable audio/video…');
+
+    const extractScript = r'''
+(function(){
+  var urls = [];
+  var media = document.querySelectorAll('audio, video, source');
+  for (var i = 0; i < media.length; i++) {
+    var src = media[i].src || media[i].getAttribute('src') || '';
+    if (src && /^https?:/.test(src)) urls.push(src);
+  }
+  var links = document.querySelectorAll('a[href]');
+  for (var j = 0; j < links.length; j++) {
+    var href = links[j].href || '';
+    if (/\.(mp3|m4a|aac|flac|wav|mp4|webm|mkv|ogg)(\?|$)/i.test(href)) {
+      urls.push(href);
+    }
+  }
+  return JSON.stringify(urls);
+})()
+''';
+    try {
+      final res = _decodeJs(await _browser.runJavaScriptReturningResult(extractScript));
+      if (res is List && res.isNotEmpty) {
+        final mediaUrl = Uri.tryParse(res.first.toString());
+        if (mediaUrl != null) {
+          unawaited(_saveDownload(mediaUrl));
+          return;
+        }
+      }
+    } catch (_) {}
+
+    unawaited(_saveDownload(uri));
+  }
+
   void _snack(String message) {
     if (!mounted) return;
     if (widget.job != null) {
-      // Nobody sees a hidden browser; the upload screen shows the job instead.
       debugPrint('nexBrowser: $message');
       return;
     }
@@ -6645,8 +7237,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     }
   }
 
-  /// Downloads a song or video a page links to and opens the upload screen
-  /// with it. Links that turn out to be ordinary pages open in the browser.
   Future<void> _saveDownload(
     Uri url, {
     bool keepConverterOnWebPage = false,
@@ -6708,7 +7298,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     await Navigator.of(context).push<void>(
       MaterialPageRoute(builder: (_) => UploadScreen(initialPaths: [filePath])),
     );
-    // A running upload still needs the file; otherwise drop the cached copy.
     if (!_music.uploads.any(
       (item) => item.path == filePath || item.original?.path == filePath,
     )) {
@@ -6716,9 +7305,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     }
   }
 
-  /// A cross-host URL requested by a converter can be either its media CDN or
-  /// an advert. [_saveDownload] identifies it from the response MIME type; an
-  /// HTML response lands here without ever replacing the converter page.
   void _retryAfterAdvert() {
     final asked = _downloadTapAt;
     final stillWaiting =
@@ -6736,9 +7322,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     _snack('That link was not an audio or video download.');
   }
 
-  /// Presses the first ordinary result on a search page. Google sends its own
-  /// results through /goto or /url and its adverts through /aclk, so only the
-  /// first two count; other engines link straight to the site.
   static const _topResultScript = r'''
 (function(){
   var heads=document.querySelectorAll('[role="heading"], h3');
@@ -6763,9 +7346,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
 })()
 ''';
 
-  /// Reads what the site is offering right now: a convert button, a download
-  /// button, whether that download is ready to press, and whether the site is
-  /// still working. A converter swaps these around without loading a page.
   static const _actionScript = r'''
 (function(){
   var els=document.querySelectorAll('button,input[type=submit],input[type=button],a,[role=button]');
@@ -6793,9 +7373,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
 })()
 ''';
 
-  /// Types a link into the site's own box. Converter sites often keep their
-  /// box inside a shadow root and drive it from a framework, so this looks
-  /// through shadow roots and sets the value the way the page expects.
   static const _pasteScript = r'''
 (function(link){
   var boxes=[];
@@ -6833,9 +7410,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
 })(__LINK__)
 ''';
 
-  /// Presses the site's own button with the given word on it. Adverts on
-  /// converter pages wear the same words and lead away to other sites, so
-  /// candidates are scored and a link to another host is refused outright.
   static const _clickScript = r'''
 (function(words){
   var els=document.querySelectorAll('button,input[type=submit],input[type=button],a,[role=button]');
@@ -6879,8 +7453,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
 })(__WORDS__)
 ''';
 
-  /// Reads a value back from the page. Android hands the result over as a
-  /// JSON string, so it can arrive encoded twice.
   Object? _decodeJs(Object? value) {
     var decoded = value;
     for (var round = 0; round < 2; round++) {
@@ -6894,9 +7466,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     return decoded;
   }
 
-  /// True for a search engine's result page. The converter sites stay on
-  /// offer there; the paste and convert buttons only belong on the site the
-  /// listener actually opens.
   bool _isSearchPage(String url) {
     final uri = Uri.tryParse(url);
     if (uri == null) return false;
@@ -6910,18 +7479,29 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
   Future<void> _onPageFinished(String url) async {
     if (!mounted || url.startsWith('data:') || url.startsWith('about:')) return;
     final run = _pageRun;
-    setState(() => _loading = false);
+    final canBack = await _browser.canGoBack();
+    final canFwd = await _browser.canGoForward();
+
+    if (mounted) {
+      setState(() {
+        _loading = false;
+        _canGoBack = canBack;
+        _canGoForward = canFwd;
+      });
+    }
+
     if (_isSearchPage(url)) {
-      unawaited(_openTopResult());
+      // Only auto-open if explicitly enabled by user or if in background job:
+      if (_autoOpenTopResult || widget.job != null) {
+        unawaited(_openTopResult());
+      }
       return;
     }
     await _detectPageAction(run);
   }
 
-  /// Opens the first ordinary result of the search a shared link started, so
-  /// the listener lands straight on a converter. Results can appear a moment
-  /// after the page reports itself loaded, so this looks a few times.
   Future<void> _openTopResult() async {
+    if (!_autoOpenTopResult && widget.job == null) return;
     if (_topResultOpened || _findingTopResult || widget.pasteLink.isEmpty) {
       return;
     }
@@ -6949,9 +7529,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     }
   }
 
-  /// Reads what the open site offers now, so the one button can follow it.
-  /// [run] is the page load this reading belongs to; a newer load throws the
-  /// reading away, so the button never shows an action from the old page.
   Future<void> _detectPageAction(int run) async {
     bool convert = false, ready = false, busy = false;
     try {
@@ -6967,9 +7544,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
       debugPrint('nexBrowser: action probe failed: $error');
     }
     if (!mounted || run != _pageRun || _loading) return;
-    // Reading the page may only carry the button on from Converting to
-    // Download. Every other step is set by the listener's own tap, which is
-    // what keeps the button from flickering while a site settles.
     var phase = _phase;
     var idle = _idleReads;
     if (phase == _BrowserStep.converting) {
@@ -6980,8 +7554,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
         idle = 0;
       } else {
         idle += 1;
-        // The site is offering neither work nor a file, so put the button
-        // back instead of leaving it stuck on Converting.
         if (idle >= 12) {
           phase = _BrowserStep.convert;
           idle = 0;
@@ -7010,12 +7582,9 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     _startActionWatch(run);
   }
 
-  /// For a shared link, presses the next step by itself once the page is
-  /// ready for it, so the listener only has to watch: Paste, then Convert,
-  /// then Download. Each step gets a few spaced-out tries; after that the
-  /// button is left to the listener, and only the last try says what failed.
   void _autoAdvance() {
     if (!mounted || widget.pasteLink.isEmpty) return;
+    if (!_autoOpenTopResult && widget.job == null) return;
     if (!_siteOpen || _loading || _working || _downloading || _fileTaken) {
       return;
     }
@@ -7027,16 +7596,12 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
       _ => 0,
     };
     final tries = _autoTries[step] ?? 0;
-    // Give the site a moment between presses. A download waits longer,
-    // because the file may still be on its way while the page looks idle.
     final gap = step == _BrowserStep.download
         ? const Duration(seconds: 4)
         : const Duration(milliseconds: 1200);
     final last = _lastAutoAt;
     final waited = last == null || DateTime.now().difference(last) >= gap;
     if (tries >= limit) {
-      // Every try is spent and the page has not moved on. A hidden browser has
-      // nobody to hand the button to, so its job ends here.
       if (limit > 0 && waited) widget.job?.fail(_stepFailure(step));
       return;
     }
@@ -7046,9 +7611,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     unawaited(_runStep(quiet: tries + 1 < limit));
   }
 
-  /// Keeps re-reading the site's buttons. A converter finishes its work
-  /// without loading a new page, so the button has to follow the page itself
-  /// rather than the page load.
   void _startActionWatch(int run) {
     if (_actionTimer?.isActive ?? false) return;
     _actionTimer = Timer.periodic(const Duration(milliseconds: 400), (timer) {
@@ -7060,7 +7622,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     });
   }
 
-  /// Types the shared link into the site's own box.
   Future<void> _pasteSharedLink({bool quiet = false}) async {
     var link = widget.pasteLink.trim();
     if (link.isEmpty) {
@@ -7090,8 +7651,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     }
   }
 
-  /// Words a converter puts on the button that starts the work. Sites label
-  /// it anything from "Convert" to a bare "Go", so they are tried in turn.
   static const _convertWords = [
     'convert',
     'start',
@@ -7103,10 +7662,8 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     'ok',
   ];
 
-  /// Words a site puts on the button that hands the finished file over.
   static const _downloadWords = ['download', 'save', 'get link', 'direct'];
 
-  /// Presses the site's own button, trying [words] in order of preference.
   Future<void> _tapPageAction(List<String> words, {bool quiet = false}) async {
     setState(() => _working = true);
     try {
@@ -7122,26 +7679,19 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
       if (!quiet) _snack('This page would not take the tap.');
     }
     if (mounted) setState(() => _working = false);
-    // Read the page straight away rather than waiting for the next tick, so
-    // the button follows the tap without a visible pause.
     await _detectPageAction(_pageRun);
   }
 
-  /// How far the listener has got, which is what the single button offers.
   _BrowserStep get _step {
     if (_downloading) return _BrowserStep.downloading;
     return _phase;
   }
 
-  /// Carries out the step the button shows. [quiet] keeps a failed press from
-  /// saying so, for the app's own early tries at a step.
   Future<void> _runStep({bool quiet = false}) async {
     switch (_step) {
       case _BrowserStep.paste:
         await _pasteSharedLink(quiet: quiet);
       case _BrowserStep.convert:
-        // Carry the button on at once. Waiting for the page to report back
-        // is what left it showing the wrong thing for a second or two.
         setState(() {
           _phase = _BrowserStep.converting;
           _idleReads = 0;
@@ -7151,7 +7701,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
         _downloadTapAt = DateTime.now();
         setState(() => _phase = _BrowserStep.downloading);
         await _tapPageAction(_downloadWords, quiet: quiet);
-        // No download started, so put the button back rather than stick.
         if (mounted && !_downloading) {
           setState(() => _phase = _BrowserStep.download);
         }
@@ -7162,8 +7711,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     }
   }
 
-  /// One button that follows the site: Paste, then Convert, then Converting
-  /// while it works, then Download, then Downloading.
   Widget _actionsBar() {
     final step = _step;
     final waiting =
@@ -7184,23 +7731,34 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
       _BrowserStep.download => Icons.download_rounded,
       _ => Icons.hourglass_top_rounded,
     };
-    return Padding(
-      // A fixed gap below the button, because phones that report no bottom
-      // inset would otherwise put it flush against the edge of the screen.
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-      child: SizedBox(
-        width: double.infinity,
-        child: FilledButton.icon(
-          onPressed: waiting || _working ? null : _runStep,
-          icon: waiting
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : Icon(icon, size: 18),
-          label: Text(label),
-        ),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      color: Theme.of(context)
+          .colorScheme
+          .surfaceContainerHighest
+          .withValues(alpha: 0.8),
+      child: Row(
+        children: [
+          Expanded(
+            child: FilledButton.icon(
+              onPressed: waiting || _working ? null : _runStep,
+              icon: waiting
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(icon, size: 18),
+              label: Text(label),
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            tooltip: 'Hide assistant bar',
+            icon: const Icon(Icons.close_rounded, size: 18),
+            onPressed: () => setState(() => _showSmartBar = false),
+          ),
+        ],
       ),
     );
   }
@@ -7236,15 +7794,59 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                'Shortcuts',
+                'Shortcuts & Bookmarks',
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 4),
               Text(
-                'Save searches or links you open often.',
+                'Quick links to common music and converter portals.',
                 style: TextStyle(color: _muted(sheetContext), fontSize: 13),
               ),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  ActionChip(
+                    avatar: const Icon(Icons.search_rounded, size: 16),
+                    label: const Text('Google'),
+                    onPressed: () {
+                      Navigator.pop(sheetContext);
+                      _go('https://www.google.com');
+                    },
+                  ),
+                  ActionChip(
+                    avatar: const Icon(Icons.play_arrow_rounded, size: 16),
+                    label: const Text('YouTube'),
+                    onPressed: () {
+                      Navigator.pop(sheetContext);
+                      _go('https://m.youtube.com');
+                    },
+                  ),
+                  ActionChip(
+                    avatar: const Icon(Icons.audiotrack_rounded, size: 16),
+                    label: const Text('MP3 Converters'),
+                    onPressed: () {
+                      Navigator.pop(sheetContext);
+                      _go('https://www.google.com/search?q=youtube+to+mp3+converter');
+                    },
+                  ),
+                  ActionChip(
+                    avatar: const Icon(Icons.cloud_queue_rounded, size: 16),
+                    label: const Text('SoundCloud'),
+                    onPressed: () {
+                      Navigator.pop(sheetContext);
+                      _go('https://m.soundcloud.com');
+                    },
+                  ),
+                ],
+              ),
               const SizedBox(height: 16),
+              const Text(
+                'Custom Shortcuts',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 8),
               for (final controller in [
                 _firstPillController,
                 _secondPillController,
@@ -7271,6 +7873,257 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     );
   }
 
+  void _showAdvancedControls() {
+    if (!mounted) return;
+    final scheme = Theme.of(context).colorScheme;
+    final currentHost = Uri.tryParse(_currentPage ?? '')?.host ?? '';
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      backgroundColor: scheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setModalState) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: NexMusicApp.violet.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Icon(
+                        Icons.tune_rounded,
+                        color: NexMusicApp.violet,
+                        size: 22,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Browser Control Center',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          Text(
+                            currentHost.isNotEmpty ? currentHost : 'Free Browsing Mode',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                const Divider(),
+
+                // CONTROL 1: Auto-select 1st link toggle
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  secondary: const Icon(Icons.touch_app_rounded),
+                  title: const Text('Auto-open first search link'),
+                  subtitle: Text(
+                    _autoOpenTopResult
+                        ? 'Browser will auto-click the 1st search result'
+                        : 'Manual: You choose which website to click',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  value: _autoOpenTopResult,
+                  onChanged: (val) {
+                    setState(() => _autoOpenTopResult = val);
+                    setModalState(() {});
+                  },
+                ),
+
+                // CONTROL 2: Free browsing / Cross-domain toggle
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  secondary: const Icon(Icons.open_in_new_rounded),
+                  title: const Text('Free Browsing Mode'),
+                  subtitle: Text(
+                    _allowCrossDomain
+                        ? 'Enabled: Navigate freely to any site or link'
+                        : 'Locked: Restrict navigation to converter host',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  value: _allowCrossDomain,
+                  onChanged: (val) {
+                    setState(() => _allowCrossDomain = val);
+                    setModalState(() {});
+                  },
+                ),
+
+                // CONTROL 3: Ad Blocker
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  secondary: const Icon(Icons.shield_outlined),
+                  title: const Text('Block Popups & Redirect Ads'),
+                  subtitle: const Text(
+                    'Blocks aggressive ad networks & unwanted popunders',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  value: _blockAds,
+                  onChanged: (val) {
+                    setState(() => _blockAds = val);
+                    setModalState(() {});
+                  },
+                ),
+
+                // CONTROL 4: Desktop Site Mode
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  secondary: const Icon(Icons.desktop_windows_rounded),
+                  title: const Text('Desktop site'),
+                  subtitle: const Text(
+                    'Request desktop view of web pages',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  value: _isDesktopMode,
+                  onChanged: (val) {
+                    Navigator.pop(sheetContext);
+                    _toggleDesktopMode(val);
+                  },
+                ),
+
+                // CONTROL 5: Smart Converter Bar
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  secondary: const Icon(Icons.download_rounded),
+                  title: const Text('Show Converter Assistant Bar'),
+                  subtitle: const Text(
+                    'Floating Paste / Convert / Download helper at bottom',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  value: _showSmartBar,
+                  onChanged: (val) {
+                    setState(() => _showSmartBar = val);
+                    setModalState(() {});
+                  },
+                ),
+
+                const Divider(),
+
+                // Zoom controls
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.zoom_in_rounded),
+                          SizedBox(width: 14),
+                          Text(
+                            'Page Zoom',
+                            style: TextStyle(fontWeight: FontWeight.w500),
+                          ),
+                        ],
+                      ),
+                      Row(
+                        children: [
+                          IconButton.filledTonal(
+                            icon: const Icon(Icons.remove_rounded, size: 18),
+                            onPressed: () {
+                              _changeZoom(-0.1);
+                              setModalState(() {});
+                            },
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            child: Text(
+                              '${(_zoomLevel * 100).round()}%',
+                              style: const TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                          IconButton.filledTonal(
+                            icon: const Icon(Icons.add_rounded, size: 18),
+                            onPressed: () {
+                              _changeZoom(0.1);
+                              setModalState(() {});
+                            },
+                          ),
+                          if (_zoomLevel != 1.0)
+                            TextButton(
+                              onPressed: () {
+                                _resetZoom();
+                                setModalState(() {});
+                              },
+                              child: const Text('Reset', style: TextStyle(fontSize: 12)),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+
+                const Divider(),
+
+                // Direct Action Buttons
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.file_download_outlined, color: NexMusicApp.violet),
+                  title: const Text('Capture Media from this page'),
+                  subtitle: const Text('Detect audio/video stream and save to NexMusic'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _captureMediaFromPage();
+                  },
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.copy_rounded),
+                  title: const Text('Copy Current URL'),
+                  subtitle: Text(
+                    _currentPage ?? 'None',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    final url = _currentPage;
+                    if (url != null && url.isNotEmpty) {
+                      Clipboard.setData(ClipboardData(text: url));
+                      _snack('URL copied to clipboard');
+                    }
+                  },
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.cleaning_services_rounded),
+                  title: const Text('Clear Cache & Cookies'),
+                  subtitle: const Text('Free up memory and reset site cookies'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _clearBrowsingData();
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _actionTimer?.cancel();
@@ -7282,7 +8135,6 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     super.dispose();
   }
 
-  /// What a hidden browser is doing, in words for the upload screen.
   String _jobStatus() {
     if (!_siteOpen || _loading) {
       return _topResultOpened
@@ -7322,34 +8174,170 @@ class _NexBrowserScreenState extends State<NexBrowserScreen> {
     }
     return Scaffold(
       appBar: AppBar(
-        titleSpacing: 0,
+        titleSpacing: 8,
         automaticallyImplyLeading: false,
-        title: TextField(
-          controller: _addressController,
-          keyboardType: TextInputType.url,
-          textInputAction: TextInputAction.go,
-          onSubmitted: _go,
-          decoration: const InputDecoration(
-            hintText: 'Search or enter address',
-            isDense: true,
+        leading: IconButton(
+          tooltip: 'Close Browser',
+          icon: const Icon(Icons.arrow_back_rounded),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: Container(
+          height: 40,
+          decoration: BoxDecoration(
+            color: Theme.of(context)
+                .colorScheme
+                .surfaceContainerHighest
+                .withValues(alpha: 0.6),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: Theme.of(context)
+                  .colorScheme
+                  .outline
+                  .withValues(alpha: 0.15),
+            ),
+          ),
+          child: Row(
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: Icon(
+                  _addressController.text.startsWith('https')
+                      ? Icons.lock_rounded
+                      : Icons.public_rounded,
+                  size: 16,
+                  color: _addressController.text.startsWith('https')
+                      ? Colors.green
+                      : Colors.grey,
+                ),
+              ),
+              Expanded(
+                child: TextField(
+                  controller: _addressController,
+                  keyboardType: TextInputType.url,
+                  textInputAction: TextInputAction.go,
+                  onSubmitted: _go,
+                  style: const TextStyle(fontSize: 13),
+                  decoration: InputDecoration(
+                    hintText: 'Search or enter address',
+                    hintStyle: TextStyle(
+                      fontSize: 13,
+                      color: Theme.of(context)
+                          .colorScheme
+                          .onSurfaceVariant
+                          .withValues(alpha: 0.7),
+                    ),
+                    border: InputBorder.none,
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                  ),
+                ),
+              ),
+              if (_addressController.text.isNotEmpty)
+                IconButton(
+                  icon: const Icon(Icons.clear_rounded, size: 16),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () {
+                    _addressController.clear();
+                    setState(() {});
+                  },
+                ),
+            ],
           ),
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Browser Controls',
+            icon: const Icon(Icons.tune_rounded),
+            onPressed: _showAdvancedControls,
+          ),
+        ],
         bottom: _progress > 0 && _progress < 100
             ? PreferredSize(
-                preferredSize: const Size.fromHeight(2),
+                preferredSize: const Size.fromHeight(2.5),
                 child: LinearProgressIndicator(
                   value: _progress / 100,
-                  minHeight: 2,
+                  minHeight: 2.5,
+                  color: NexMusicApp.violet,
                 ),
               )
             : null,
       ),
-      body: WebViewWidget(controller: _browser),
+      body: PopScope(
+        canPop: !_canGoBack,
+        onPopInvokedWithResult: (didPop, _) async {
+          if (didPop) return;
+          if (_canGoBack) {
+            await _browser.goBack();
+          }
+        },
+        child: WebViewWidget(controller: _browser),
+      ),
       bottomNavigationBar: SafeArea(
         top: false,
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          children: [if (_siteOpen && !_loading) _actionsBar()],
+          children: [
+            if (_showSmartBar && _siteOpen && !_loading) _actionsBar(),
+            Container(
+              height: 48,
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surface,
+                border: Border(
+                  top: BorderSide(
+                    color: Theme.of(context)
+                        .colorScheme
+                        .outlineVariant
+                        .withValues(alpha: 0.3),
+                  ),
+                ),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18),
+                    tooltip: 'Back',
+                    onPressed: _canGoBack ? () => _browser.goBack() : null,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.arrow_forward_ios_rounded, size: 18),
+                    tooltip: 'Forward',
+                    onPressed: _canGoForward ? () => _browser.goForward() : null,
+                  ),
+                  IconButton(
+                    icon: Icon(
+                      _loading ? Icons.close_rounded : Icons.refresh_rounded,
+                      size: 20,
+                    ),
+                    tooltip: _loading ? 'Stop' : 'Reload',
+                    onPressed: () {
+                      if (_loading) {
+                        _browser.runJavaScript('window.stop();');
+                        setState(() => _loading = false);
+                      } else {
+                        _browser.reload();
+                      }
+                    },
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.home_rounded, size: 22),
+                    tooltip: 'Home',
+                    onPressed: _goHome,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.bookmark_border_rounded, size: 20),
+                    tooltip: 'Shortcuts',
+                    onPressed: _showQuickPanel,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.tune_rounded, size: 20),
+                    tooltip: 'Controls',
+                    onPressed: _showAdvancedControls,
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );

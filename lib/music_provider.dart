@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:pointycastle/api.dart';
 import 'package:pointycastle/block/desede_engine.dart';
 
@@ -24,6 +24,7 @@ abstract class MusicProvider {
   Future<List<Song>> loadFeatured({int limit = 20, int page = 1});
   Future<List<Song>> searchSongs(String query, {int limit = 20, int page = 1});
   Future<String> resolveStreamUrl(Song song);
+  Future<List<Song>> loadRadio(String sourceId, {int limit = 25});
 }
 
 /// JioSaavn source used by the provider bundle discovered in the reference APK.
@@ -111,6 +112,11 @@ class JioSaavnProvider implements MusicProvider {
     final decoded = decodeJioSaavnMediaUrl(encrypted);
     final hasHighQuality = _string(more?['320kbps']).toLowerCase() == 'true';
     return _withQuality(decoded, hasHighQuality ? '320' : '160');
+  }
+
+  @override
+  Future<List<Song>> loadRadio(String sourceId, {int limit = 25}) async {
+    return loadFeatured(limit: limit);
   }
 
   Song? _songFrom(Map<String, dynamic> item) {
@@ -458,6 +464,98 @@ class YouTubeMusicProvider implements MusicProvider {
     );
   }
 
+  @override
+  Future<List<Song>> loadRadio(String sourceId, {int limit = 25}) async {
+    final videoId = sourceId.trim();
+    if (videoId.isEmpty) return const [];
+    try {
+      final data = await _postJson(
+        Uri.parse(
+          'https://music.youtube.com/youtubei/v1/next'
+          '?alt=json&key=$_apiKey',
+        ),
+        {
+          'context': {
+            'client': {
+              'clientName': 'WEB_REMIX',
+              'clientVersion': _webClientVersion,
+              'hl': 'en',
+              'gl': 'IN',
+            },
+            'user': <String, dynamic>{},
+          },
+          'videoId': videoId,
+          'playlistId': 'RDAMVM$videoId',
+        },
+        const {
+          HttpHeaders.userAgentHeader: _webUserAgent,
+          'Origin': 'https://music.youtube.com',
+          'Referer': 'https://music.youtube.com/',
+        },
+      );
+
+      final renderers = <Map<String, dynamic>>[];
+      _collectNamedMaps(data, 'playlistPanelVideoRenderer', renderers);
+      final seen = <String>{};
+      final results = <Song>[];
+      for (final renderer in renderers) {
+        final song = _songFromPlaylistPanel(renderer);
+        if (song != null && seen.add(song.sourceId)) {
+          results.add(song);
+        }
+        if (results.length >= limit.clamp(1, 50)) break;
+      }
+      return results;
+    } catch (e) {
+      debugPrint('YouTube Music loadRadio error: $e');
+      return const [];
+    }
+  }
+
+  Song? _songFromPlaylistPanel(Map<String, dynamic> renderer) {
+    final sourceId = _string(renderer['videoId']);
+    if (sourceId.isEmpty) return null;
+
+    final title = _text(renderer['title']);
+    if (title.isEmpty) return null;
+
+    final byline = renderer['longBylineText'] ?? renderer['shortBylineText'];
+    final runs = _map(byline)?['runs'];
+    final artists = <String>[];
+    if (runs is List) {
+      for (final raw in runs.whereType<Map>()) {
+        final text = _string(raw['text']).trim();
+        if (text.isEmpty || text == '•' || text == '&' || text == ',') continue;
+        artists.add(text);
+      }
+    }
+    if (artists.isEmpty) {
+      final first = _text(byline).split('•').first.trim();
+      if (first.isNotEmpty) artists.add(first);
+    }
+
+    final lengthRun = _map(renderer['lengthText'])?['runs'];
+    var durationMs = 0;
+    if (lengthRun is List && lengthRun.isNotEmpty) {
+      final durStr = _string(lengthRun.first['text']);
+      final parsed = _durationMs(durStr);
+      if (parsed != null) durationMs = parsed;
+    }
+
+    return Song(
+      id: 'provider:$id:$sourceId',
+      title: title,
+      kind: 'audio',
+      url: '',
+      categoryId: 'provider:$id',
+      providerId: id,
+      sourceId: sourceId,
+      artist: artists.toSet().join(', '),
+      artworkUrl: _largestThumbnail(renderer),
+      durationMs: durationMs,
+    );
+  }
+
   static Future<Map<String, dynamic>> _httpPostJson(
     Uri uri,
     Map<String, dynamic> body,
@@ -710,6 +808,14 @@ class YouTubeVideoProvider implements MusicProvider {
       );
     }
     return _resolveYouTubeMuxedStream(_postJson, song.sourceId);
+  }
+
+  @override
+  Future<List<Song>> loadRadio(String sourceId, {int limit = 25}) async {
+    return YouTubeMusicProvider(postJson: _postJson).loadRadio(
+      sourceId,
+      limit: limit,
+    );
   }
 }
 

@@ -288,6 +288,83 @@ void main() {
 
       expect(provider.playbackHeaders(_ProviderSong.youtubeSong), isEmpty);
     });
+
+    test('loads radio recommendations from youtubei next', () async {
+      late Uri requested;
+      late Map<String, dynamic> sentBody;
+      final provider = YouTubeMusicProvider(
+        postJson: (uri, body, headers) async {
+          requested = uri;
+          sentBody = body;
+          return {
+            'contents': {
+              'singleColumnMusicWatchNextResultsRenderer': {
+                'tabbedRenderer': {
+                  'watchNextTabbedResultsRenderer': {
+                    'tabs': [
+                      {
+                        'tabRenderer': {
+                          'content': {
+                            'musicQueueRenderer': {
+                              'content': {
+                                'playlistPanelRenderer': {
+                                  'contents': [
+                                    {
+                                      'playlistPanelVideoRenderer': {
+                                        'videoId': 'radio-1',
+                                        'title': {
+                                          'runs': [
+                                            {'text': 'Recommended Track 1'},
+                                          ],
+                                        },
+                                        'longBylineText': {
+                                          'runs': [
+                                            {'text': 'Artist 1'},
+                                          ],
+                                        },
+                                        'thumbnail': {
+                                          'thumbnails': [
+                                            {
+                                              'url':
+                                                  'https://img.example/radio-1.jpg',
+                                              'width': 544,
+                                            },
+                                          ],
+                                        },
+                                        'lengthText': {
+                                          'runs': [
+                                            {'text': '3:15'},
+                                          ],
+                                        },
+                                      },
+                                    },
+                                  ],
+                                },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          };
+        },
+      );
+
+      final results = await provider.loadRadio('track-seed');
+
+      expect(requested.path, endsWith('/next'));
+      expect(sentBody['videoId'], 'track-seed');
+      expect(sentBody['playlistId'], 'RDAMVMtrack-seed');
+      expect(results, hasLength(1));
+      expect(results.first.id, 'provider:ytmusic:radio-1');
+      expect(results.first.title, 'Recommended Track 1');
+      expect(results.first.artist, 'Artist 1');
+      expect(results.first.durationMs, 195000);
+    });
   });
 
   group('YouTubeVideoProvider', () {
