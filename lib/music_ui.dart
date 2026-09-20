@@ -1233,6 +1233,7 @@ class _SpotifySongCard extends StatelessWidget {
     final card = InkWell(
       borderRadius: BorderRadius.circular(12),
       onTap: () => _openSong(context, song, queue: queue),
+      onLongPress: () => _songActions(context, song),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
@@ -1321,7 +1322,14 @@ class _SpotifySongCard extends StatelessWidget {
     if (width != null && width!.isFinite) {
       return SizedBox(width: width, child: card);
     }
-    return card;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth.isInfinite) {
+          return SizedBox(width: 142, child: card);
+        }
+        return card;
+      },
+    );
   }
 
   Widget _fallback(ColorScheme scheme) {
@@ -1512,6 +1520,7 @@ class _SpotifySection extends StatelessWidget {
             itemBuilder: (_, i) => _SpotifySongCard(
               song: songs[i],
               queue: songs,
+              width: 142,
             ),
           ),
         ),
@@ -1535,6 +1544,18 @@ class _SpotifyHomeViewState extends State<_SpotifyHomeView> {
   String? _selectedCategory;
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final music = context.read<MusicController>();
+      if (music.providerSongs.isEmpty && !music.providerLoading) {
+        music.loadProviderHome('ytmusic');
+      }
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     final music = context.watch<MusicController>();
     final recentSongs = music.recentSongs;
@@ -1542,7 +1563,12 @@ class _SpotifyHomeViewState extends State<_SpotifyHomeView> {
     final allSongs = music.songs;
 
     return RefreshIndicator(
-      onRefresh: music.refreshCatalog,
+      onRefresh: () async {
+        await Future.wait([
+          music.refreshCatalog(),
+          music.loadProviderHome('ytmusic'),
+        ]);
+      },
       child: CustomScrollView(
         slivers: [
           SliverToBoxAdapter(
@@ -1828,6 +1854,46 @@ class _SpotifyHomeViewState extends State<_SpotifyHomeView> {
                   title: 'YouTube Music Highlights',
                   subtitle: 'Top online streams',
                   songs: music.providerSongs,
+                ),
+              ),
+
+            if (allSongs.isEmpty && music.providerSongs.isEmpty)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 48),
+                  child: Center(
+                    child: music.providerLoading
+                        ? const Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              SizedBox(
+                                width: 28,
+                                height: 28,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.5,
+                                  color: NexMusicApp.violet,
+                                ),
+                              ),
+                              SizedBox(height: 12),
+                              Text(
+                                'Loading music for you...',
+                                style: TextStyle(
+                                  color: Colors.grey,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ],
+                          )
+                        : Text(
+                            'No songs available yet.\nExplore the Stream tab or upload songs.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: _muted(context),
+                              fontSize: 13,
+                              height: 1.5,
+                            ),
+                          ),
+                  ),
                 ),
               ),
 

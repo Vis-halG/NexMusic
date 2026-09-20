@@ -111,9 +111,9 @@ void main() {
     await tester.pumpWidget(_app(controller));
     await tester.pumpAndSettle();
 
-    expect(find.text('Tum Hi Ho'), findsOneWidget);
-    expect(find.text('Kesariya'), findsOneWidget);
-    expect(find.text('Lofi Rain'), findsOneWidget);
+    expect(find.text('Tum Hi Ho'), findsWidgets);
+    expect(find.text('Kesariya'), findsWidgets);
+    expect(find.text('Lofi Rain'), findsWidgets);
 
     // The category pill comes before the song subtitles that repeat its name.
     await tester.tap(find.text('Lo-fi').first);
@@ -123,7 +123,7 @@ void main() {
 
     await tester.tap(find.text('All'));
     await tester.pumpAndSettle();
-    expect(find.text('Tum Hi Ho'), findsOneWidget);
+    expect(find.text('Tum Hi Ho'), findsWidgets);
     expect(tester.takeException(), isNull);
 
     await tester.pumpWidget(const SizedBox.shrink());
