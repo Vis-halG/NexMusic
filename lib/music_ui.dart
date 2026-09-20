@@ -1199,12 +1199,12 @@ class _SpotifySongCard extends StatelessWidget {
   const _SpotifySongCard({
     required this.song,
     required this.queue,
-    this.width = 142,
+    this.width,
   });
 
   final Song song;
   final List<Song> queue;
-  final double width;
+  final double? width;
 
   @override
   Widget build(BuildContext context) {
@@ -1216,20 +1216,18 @@ class _SpotifySongCard extends StatelessWidget {
       (m) => m.playing && isCurrent,
     );
 
-    return SizedBox(
-      width: width,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () => _openSong(context, song, queue: queue),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Stack(
-              children: [
-                Container(
-                  width: width,
-                  height: width,
+    final card = InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: () => _openSong(context, song, queue: queue),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Stack(
+            children: [
+              AspectRatio(
+                aspectRatio: 1,
+                child: Container(
                   decoration: BoxDecoration(
                     color: scheme.surfaceContainer,
                     borderRadius: BorderRadius.circular(12),
@@ -1250,61 +1248,66 @@ class _SpotifySongCard extends StatelessWidget {
                         )
                       : _fallback(scheme),
                 ),
-                Positioned(
-                  right: 8,
-                  bottom: 8,
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: isCurrent
-                          ? NexMusicApp.violet
-                          : const Color(0xFF1DB954),
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.4),
-                          blurRadius: 6,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    child: Icon(
-                      isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                      color: Colors.white,
-                      size: 22,
-                    ),
+              ),
+              Positioned(
+                right: 8,
+                bottom: 8,
+                child: Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: isCurrent
+                        ? NexMusicApp.violet
+                        : const Color(0xFF1DB954),
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.4),
+                        blurRadius: 6,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Icon(
+                    isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                    color: Colors.white,
+                    size: 22,
                   ),
                 ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(
-              song.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontWeight: FontWeight.w600,
-                fontSize: 13,
-                color: isCurrent ? NexMusicApp.violet : scheme.onSurface,
               ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            song.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 13,
+              color: isCurrent ? NexMusicApp.violet : scheme.onSurface,
             ),
-            const SizedBox(height: 2),
-            Text(
-              song.artist.isNotEmpty
-                  ? song.artist
-                  : (song.isProvider ? 'Online stream' : 'NexMusic'),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: scheme.onSurfaceVariant,
-                fontSize: 11,
-              ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            song.artist.isNotEmpty
+                ? song.artist
+                : (song.isProvider ? 'Online stream' : 'NexMusic'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: scheme.onSurfaceVariant,
+              fontSize: 11,
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
+
+    if (width != null && width!.isFinite) {
+      return SizedBox(width: width, child: card);
+    }
+    return card;
   }
 
   Widget _fallback(ColorScheme scheme) {
@@ -2469,14 +2472,13 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
               crossAxisCount: 2,
               mainAxisSpacing: 14,
               crossAxisSpacing: 14,
-              childAspectRatio: 0.76,
+              childAspectRatio: 0.72,
             ),
             itemBuilder: (context, index) {
               final song = songs[index];
               return _SpotifySongCard(
                 song: song,
                 queue: songs,
-                width: double.infinity,
               );
             },
           ),
