@@ -959,6 +959,8 @@ class _MusicShellState extends State<MusicShell> {
   Future<void> _checkAutoUpdate() async {
     if (!mounted || kIsWeb) return;
     try {
+      await Future<void>.delayed(const Duration(milliseconds: 1500));
+      if (!mounted) return;
       final update = await AppUpdateService().checkForUpdate();
       if (update != null && mounted) {
         _showUpdateSheet(context, update);
