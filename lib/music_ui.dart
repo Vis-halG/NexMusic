@@ -978,6 +978,7 @@ class MusicShell extends StatefulWidget {
 class _MusicShellState extends State<MusicShell> {
   StreamSubscription<List<SharedMediaFile>>? _shareSubscription;
   StreamSubscription<String>? _launchSubscription;
+  Timer? _updateTimer;
 
   @override
   void initState() {
@@ -1001,35 +1002,37 @@ class _MusicShellState extends State<MusicShell> {
     });
   }
 
-  Future<void> _checkAutoUpdate() async {
+  void _checkAutoUpdate() {
     if (!mounted || kIsWeb) return;
-    try {
-      await Future<void>.delayed(const Duration(milliseconds: 1500));
+    _updateTimer?.cancel();
+    _updateTimer = Timer(const Duration(milliseconds: 1500), () async {
       if (!mounted) return;
-      final controller = context.read<MusicController>();
-      final update = await AppUpdateService().checkForUpdate(
-        currentVersion: controller.installedVersion,
-        phone: controller.phone,
-      );
-      if (update != null && mounted) {
-        final lastDismissed =
-            controller.preferences.getString('dismissed_update_tag');
-        if (lastDismissed == update.tagName) {
-          debugPrint('Update ${update.tagName} was dismissed; skipping.');
-          return;
-        }
-        _showUpdateSheet(
-          context,
-          update,
-          onDismiss: () {
-            controller.preferences.setString(
-              'dismissed_update_tag',
-              update.tagName,
-            );
-          },
+      try {
+        final controller = context.read<MusicController>();
+        final update = await AppUpdateService().checkForUpdate(
+          currentVersion: controller.installedVersion,
+          phone: controller.phone,
         );
-      }
-    } catch (_) {}
+        if (update != null && mounted) {
+          final lastDismissed =
+              controller.preferences.getString('dismissed_update_tag');
+          if (lastDismissed == update.tagName) {
+            debugPrint('Update ${update.tagName} was dismissed; skipping.');
+            return;
+          }
+          _showUpdateSheet(
+            context,
+            update,
+            onDismiss: () {
+              controller.preferences.setString(
+                'dismissed_update_tag',
+                update.tagName,
+              );
+            },
+          );
+        }
+      } catch (_) {}
+    });
   }
 
   void _openSharedItems(List<SharedMediaFile> items) {
@@ -1126,6 +1129,7 @@ class _MusicShellState extends State<MusicShell> {
 
   @override
   void dispose() {
+    _updateTimer?.cancel();
     _shareSubscription?.cancel();
     _launchSubscription?.cancel();
     super.dispose();
@@ -1301,6 +1305,22 @@ class _SpotifySongCard extends StatelessWidget {
                           errorBuilder: (_, _, _) => _fallback(scheme),
                         )
                       : _fallback(scheme),
+                ),
+              ),
+              Positioned(
+                top: 4,
+                right: 4,
+                child: IconButton(
+                  tooltip: 'More',
+                  iconSize: 18,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.black.withValues(alpha: 0.45),
+                    foregroundColor: Colors.white,
+                  ),
+                  icon: const Icon(Icons.more_vert_rounded),
+                  onPressed: () => _songActions(context, song),
                 ),
               ),
               Positioned(

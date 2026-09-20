@@ -247,12 +247,78 @@ lib/firebase_options.dart  generated FlutterFire configuration
 lib/music_data.dart        category, song, upload and private-library models
 lib/music_controller.dart  playback, Auth, catalogue sync, Cloudinary uploads
 lib/music_ui.dart          all screens and shared components
+lib/app_update.dart        in-app GitHub releases checker, APK downloader & installer
 lib/phone_services.dart    lock screen controls, widgets, notifications, push
 android/.../MainActivity.kt  trim/extract channel and widget launch actions
-android/.../NexPhone.kt    progress and activity notifications
+android/.../NexPhone.kt    progress and activity notifications, native package version
 android/.../NexWidgets.kt  home screen widgets
 push_worker/worker.js      Cloudflare Worker that sends activity notifications
 tool/small_apk/            builds the small APK to share
+.github/workflows/release.yml GitHub Actions pipeline that auto-builds & publishes APK releases
 firestore.rules            catalogue and private metadata rules
 storage.rules              private library file rules (Blaze only)
 ```
+
+---
+
+## 🚀 AI & Developer Guide: How to Make Changes & Trigger In-App Update Popup
+
+> **CRITICAL RULE FOR ALL DEVELOPERS & AI ASSISTANTS**:
+> Whenever you modify code, add features, or fix bugs in this project, you **MUST** follow this release & versioning procedure so that users receive the **"Update Available" in-app popup** on their devices.
+
+### 1. How the In-App Update System Works
+1. When the app starts up, `_checkAutoUpdate()` in `lib/music_ui.dart` queries the GitHub Releases API:
+   `https://api.github.com/repos/Vis-halG/NexMusic/releases/latest`
+2. It compares the **remote build number** from the GitHub release tag (e.g. `v0.2.9+4015` → build `4015`) against the device's **currently installed build number** (e.g. `4014`).
+3. If `remote.build > installed.build`, the **"Update Available" popup** immediately appears on the user's screen.
+4. Tapping **"Update Now"** downloads the APK matching the device architecture (`arm64-v8a`, `armeabi-v7a`, or `Universal`) with a real-time progress bar, and then invokes the native Android installer.
+5. **Why the popup might NOT show**:
+   - If GitHub's latest release build equals the installed build (e.g. `4014 == 4014`), the app is recognized as up-to-date and no popup will trigger.
+   - For the popup to trigger, the build number published on GitHub **must be strictly greater** than the build installed on the user's phone.
+
+---
+
+### 2. Mandatory Steps for Every Change / Update
+
+Whenever you or an AI agent make any changes to this repository, perform these steps in order:
+
+#### Step 1: Bump the Version & Build Number
+You must increment the **build number** (the integer after the `+`) in two files:
+
+1. **`pubspec.yaml`**:
+   ```yaml
+   # Increment the build number by +1 (e.g., 4014 -> 4015)
+   version: 0.2.9+4015
+   ```
+2. **`lib/app_update.dart`**:
+   ```dart
+   // Must match pubspec.yaml version exactly
+   const String currentAppVersion = '0.2.9+4015';
+   ```
+
+#### Step 2: Validate the Project
+Before pushing, ensure the codebase is healthy:
+```powershell
+flutter analyze lib/
+flutter test
+```
+
+#### Step 3: Push to GitHub `master` Branch
+Commit and push the changes to GitHub:
+```powershell
+git add .
+git commit -m "feat/fix: describe your changes [bump version to 0.2.9+4015]"
+git push origin master
+```
+
+#### Step 4: Automated GitHub Release (Hands-Off)
+Once pushed to `master`, GitHub Actions (`.github/workflows/release.yml`) automatically:
+- Reads the new version tag (e.g., `v0.2.9+4015`) from `pubspec.yaml`.
+- Builds optimized APKs (`NexMusic-arm64-v8a.apk`, `NexMusic-armeabi-v7a.apk`, `NexMusic-Universal.apk`, `NexMusic.apk`).
+- Signs the APKs with the release keystore.
+- Publishes a new GitHub Release with the tag `v0.2.9+4015` and marks it as **Latest**.
+
+#### Step 5: Verify on Device
+- When users open their installed NexMusic app (which has build `4014`), the app contacts GitHub, sees build `4015`, and shows the **Update Available** popup.
+- Users can also go to **Profile → Check for updates** to trigger the check manually.
+
