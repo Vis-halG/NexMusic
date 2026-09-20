@@ -681,6 +681,27 @@ class MusicController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<List<Song>> fetchProviderFeatured(String providerId) async {
+    final provider = _providerById(providerId);
+    if (provider == null) return const [];
+    try {
+      return await provider.loadFeatured();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<List<Song>> fetchProviderQuery(String providerId, String query) async {
+    final provider = _providerById(providerId);
+    if (provider == null) return const [];
+    try {
+      return await provider.searchSongs(query);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+
   List<Song> songsIn(String? categoryId) => categoryId == null
       ? songs
       : songs.where((song) => song.categoryId == categoryId).toList();

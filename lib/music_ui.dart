@@ -1049,13 +1049,13 @@ class _MusicShellState extends State<MusicShell> {
         case 'upload':
           _push(context, const UploadScreen());
         case 'search':
-          setState(() => _currentTabIndex = 1);
+          setState(() => _currentTabIndex = 2);
         case 'browser':
           if (_webViewSupported) {
             _push(context, const NexBrowserScreen(sharedLink: ''));
           }
         case 'downloads':
-          setState(() => _currentTabIndex = 2);
+          setState(() => _currentTabIndex = 3);
       }
     });
   }
@@ -1088,8 +1088,9 @@ class _MusicShellState extends State<MusicShell> {
     }
 
     final Widget currentView = switch (_currentTabIndex) {
-      1 => const _SpotifyBrowseView(),
-      2 => const _SpotifyLibraryView(),
+      1 => const _SpotifyStreamView(),
+      2 => const _SpotifyBrowseView(),
+      3 => const _SpotifyLibraryView(),
       _ => const _SpotifyHomeView(),
     };
 
@@ -1120,6 +1121,12 @@ class _MusicShellState extends State<MusicShell> {
                 selectedIcon:
                     Icon(Icons.home_rounded, color: NexMusicApp.violet),
                 label: 'Home',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.stream_rounded),
+                selectedIcon:
+                    Icon(Icons.stream_rounded, color: NexMusicApp.violet),
+                label: 'Stream',
               ),
               NavigationDestination(
                 icon: Icon(Icons.search_rounded),
@@ -1273,11 +1280,7 @@ class _SpotifySongCard extends StatelessWidget {
             Text(
               song.artist.isNotEmpty
                   ? song.artist
-                  : (song.isProvider
-                      ? 'Online stream'
-                      : (song.ownerName.isNotEmpty
-                          ? song.ownerName
-                          : 'NexMusic')),
+                  : (song.isProvider ? 'Online stream' : 'NexMusic'),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
@@ -1867,6 +1870,513 @@ class _SpotifyBrowseCard extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spotify Stream View (JioSaavn & YouTube Streaming with Categories)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _SpotifyStreamView extends StatefulWidget {
+  const _SpotifyStreamView();
+
+  @override
+  State<_SpotifyStreamView> createState() => _SpotifyStreamViewState();
+}
+
+class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
+  final _searchController = TextEditingController();
+  String _selectedProvider = 'all'; // 'all', 'jiosaavn', 'ytmusic', 'ytvideo'
+  String _selectedCategory = 'Trending';
+
+  static const _categories = [
+    'Trending',
+    'Bollywood',
+    'Punjabi',
+    'Lo-Fi',
+    'Pop',
+    'Workout',
+    'Rock',
+    'Devotional',
+  ];
+
+  final Map<String, List<Song>> _cachedCategories = {};
+  List<Song> _jioTrending = const [];
+  List<Song> _ytHits = const [];
+  List<Song> _ytVideos = const [];
+  List<Song> _searchResults = const [];
+  bool _loading = false;
+  Timer? _debounce;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadInitialStreams();
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadInitialStreams() async {
+    setState(() => _loading = true);
+    final music = context.read<MusicController>();
+    try {
+      final futures = await Future.wait([
+        music.fetchProviderFeatured('jiosaavn'),
+        music.fetchProviderFeatured('ytmusic'),
+        music.fetchProviderFeatured('ytvideo'),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _jioTrending = futures[0];
+        _ytHits = futures[1];
+        _ytVideos = futures[2];
+        _cachedCategories['Trending'] = [
+          ...futures[0],
+          ...futures[1],
+          ...futures[2],
+        ];
+        _loading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _selectCategory(String category) async {
+    setState(() {
+      _selectedCategory = category;
+      _searchController.clear();
+      _searchResults = const [];
+    });
+
+    if (category == 'Trending') return;
+
+    if (_cachedCategories.containsKey(category) &&
+        _cachedCategories[category]!.isNotEmpty) {
+      return;
+    }
+
+    setState(() => _loading = true);
+    final music = context.read<MusicController>();
+    try {
+      final q = '$category hits';
+      final results = await Future.wait([
+        music.fetchProviderQuery('jiosaavn', q),
+        music.fetchProviderQuery('ytmusic', q),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _cachedCategories[category] = [
+          ...results[0],
+          ...results[1],
+        ];
+        _loading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  void _onSearchChanged(String text) {
+    _debounce?.cancel();
+    final query = text.trim();
+    if (query.isEmpty) {
+      setState(() {
+        _searchResults = const [];
+        _loading = false;
+      });
+      return;
+    }
+    _debounce = Timer(const Duration(milliseconds: 400), () async {
+      setState(() => _loading = true);
+      final music = context.read<MusicController>();
+      List<Song> results = [];
+      try {
+        if (_selectedProvider == 'jiosaavn') {
+          results = await music.fetchProviderQuery('jiosaavn', query);
+        } else if (_selectedProvider == 'ytmusic') {
+          results = await music.fetchProviderQuery('ytmusic', query);
+        } else if (_selectedProvider == 'ytvideo') {
+          results = await music.fetchProviderQuery('ytvideo', query);
+        } else {
+          final res = await Future.wait([
+            music.fetchProviderQuery('jiosaavn', query),
+            music.fetchProviderQuery('ytmusic', query),
+          ]);
+          results = [...res[0], ...res[1]];
+        }
+      } catch (_) {}
+      if (!mounted) return;
+      setState(() {
+        _searchResults = results;
+        _loading = false;
+      });
+    });
+  }
+
+  List<Song> _filterByProvider(List<Song> source) {
+    if (_selectedProvider == 'all') return source;
+    return source.where((s) => s.providerId == _selectedProvider).toList();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final isSearching = _searchController.text.trim().isNotEmpty;
+
+    return ListView(
+      padding: const EdgeInsets.only(bottom: 90),
+      children: [
+        // Top Header
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+          child: Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF8B5CF6), Color(0xFF6366F1)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  Icons.stream_rounded,
+                  color: Colors.white,
+                  size: 24,
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Stream Online',
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.4,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'JioSaavn & YouTube Music',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: scheme.onSurfaceVariant,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // Search Bar in Stream Tab
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+          child: Container(
+            height: 48,
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: scheme.outline.withValues(alpha: 0.2),
+              ),
+            ),
+            child: TextField(
+              controller: _searchController,
+              onChanged: _onSearchChanged,
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                hintText: 'Search JioSaavn & YouTube tracks...',
+                hintStyle: TextStyle(
+                  color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
+                  fontSize: 13,
+                ),
+                prefixIcon: Icon(
+                  Icons.search_rounded,
+                  color: scheme.onSurfaceVariant,
+                  size: 22,
+                ),
+                suffixIcon: _searchController.text.isNotEmpty
+                    ? IconButton(
+                        icon: const Icon(Icons.clear_rounded, size: 18),
+                        onPressed: () {
+                          _searchController.clear();
+                          _onSearchChanged('');
+                        },
+                      )
+                    : null,
+                border: InputBorder.none,
+                contentPadding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+            ),
+          ),
+        ),
+
+        // Provider Selector Pills (All / JioSaavn / YouTube Music / YouTube Videos)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: SizedBox(
+            height: 34,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              children: [
+                _providerPill('all', 'All Online', Icons.public_rounded),
+                const SizedBox(width: 8),
+                _providerPill('jiosaavn', 'JioSaavn', Icons.queue_music_rounded),
+                const SizedBox(width: 8),
+                _providerPill('ytmusic', 'YouTube Music', Icons.music_note_rounded),
+                const SizedBox(width: 8),
+                _providerPill('ytvideo', 'YouTube Video', Icons.play_circle_filled_rounded),
+              ],
+            ),
+          ),
+        ),
+
+        // Category Filter Chips
+        if (!isSearching)
+          Padding(
+            padding: const EdgeInsets.only(top: 4, bottom: 12),
+            child: SizedBox(
+              height: 38,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                itemCount: _categories.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (context, index) {
+                  final cat = _categories[index];
+                  final isSelected = _selectedCategory == cat;
+                  return ChoiceChip(
+                    label: Text(cat),
+                    selected: isSelected,
+                    onSelected: (_) => _selectCategory(cat),
+                    labelStyle: TextStyle(
+                      fontSize: 12,
+                      fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                      color: isSelected ? Colors.white : scheme.onSurface,
+                    ),
+                    selectedColor: NexMusicApp.violet,
+                    backgroundColor: scheme.surfaceContainer,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20),
+                      side: BorderSide(
+                        color: isSelected
+                            ? NexMusicApp.violet
+                            : scheme.outline.withValues(alpha: 0.15),
+                      ),
+                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                  );
+                },
+              ),
+            ),
+          ),
+
+        // Loading Indicator
+        if (_loading)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 40),
+            child: Center(
+              child: SizedBox(
+                width: 32,
+                height: 32,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.5,
+                  color: NexMusicApp.violet,
+                ),
+              ),
+            ),
+          )
+        else if (isSearching)
+          // Search Results
+          _buildSearchResults(scheme)
+        else if (_selectedCategory != 'Trending')
+          // Specific Category View
+          _buildCategoryGridView(scheme)
+        else
+          // Trending Multi-Section View
+          _buildTrendingSections(scheme),
+      ],
+    );
+  }
+
+  Widget _providerPill(String id, String label, IconData icon) {
+    final isSelected = _selectedProvider == id;
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: () {
+        setState(() => _selectedProvider = id);
+        if (_searchController.text.isNotEmpty) {
+          _onSearchChanged(_searchController.text);
+        }
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? NexMusicApp.violet.withValues(alpha: 0.2)
+              : Theme.of(context).colorScheme.surfaceContainer,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: isSelected
+                ? NexMusicApp.violet
+                : Colors.transparent,
+            width: 1.2,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 14,
+              color: isSelected ? NexMusicApp.violet : null,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                color: isSelected ? NexMusicApp.violet : null,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSearchResults(ColorScheme scheme) {
+    final filtered = _filterByProvider(_searchResults);
+    if (filtered.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 60),
+        child: Center(
+          child: Column(
+            children: [
+              Icon(Icons.search_off_rounded,
+                  size: 48, color: scheme.onSurfaceVariant),
+              const SizedBox(height: 12),
+              Text(
+                'No online songs found for "${_searchController.text}"',
+                style: TextStyle(color: scheme.onSurfaceVariant),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return ListView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: filtered.length,
+      itemBuilder: (context, index) {
+        final song = filtered[index];
+        return SongTile(song: song, queue: filtered);
+      },
+    );
+  }
+
+  Widget _buildCategoryGridView(ColorScheme scheme) {
+    final raw = _cachedCategories[_selectedCategory] ?? const [];
+    final songs = _filterByProvider(raw);
+    if (songs.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 60),
+        child: Center(
+          child: Text(
+            'No songs available in $_selectedCategory right now.',
+            style: TextStyle(color: scheme.onSurfaceVariant),
+          ),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Text(
+              '$_selectedCategory Songs (${songs.length})',
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: songs.length,
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              mainAxisSpacing: 14,
+              crossAxisSpacing: 14,
+              childAspectRatio: 0.76,
+            ),
+            itemBuilder: (context, index) {
+              final song = songs[index];
+              return _SpotifySongCard(
+                song: song,
+                queue: songs,
+                width: double.infinity,
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTrendingSections(ColorScheme scheme) {
+    final jio = _filterByProvider(_jioTrending);
+    final yt = _filterByProvider(_ytHits);
+    final videos = _filterByProvider(_ytVideos);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (jio.isNotEmpty &&
+            (_selectedProvider == 'all' || _selectedProvider == 'jiosaavn'))
+          _SpotifySection(
+            title: 'JioSaavn Trending Hits',
+            subtitle: 'Top Bollywood & Hindi tracks',
+            songs: jio,
+          ),
+        if (yt.isNotEmpty &&
+            (_selectedProvider == 'all' || _selectedProvider == 'ytmusic'))
+          _SpotifySection(
+            title: 'YouTube Music Hot Tracks',
+            subtitle: 'Global & trending stream releases',
+            songs: yt,
+          ),
+        if (videos.isNotEmpty &&
+            (_selectedProvider == 'all' || _selectedProvider == 'ytvideo'))
+          _SpotifySection(
+            title: 'Trending Music Videos',
+            subtitle: 'Stream popular YouTube music videos',
+            songs: videos,
+          ),
+      ],
     );
   }
 }
