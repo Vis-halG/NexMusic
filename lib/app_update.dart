@@ -7,8 +7,8 @@ import 'package:path_provider/path_provider.dart';
 
 import 'phone_services.dart';
 
-/// Current installed version of NexMusic (matches pubspec.yaml).
-const String currentAppVersion = '0.2.9+4011';
+/// Fallback installed version of NexMusic (matches pubspec.yaml).
+const String currentAppVersion = '0.2.9+4014';
 
 class AppUpdateInfo {
   const AppUpdateInfo({
@@ -86,9 +86,21 @@ class AppUpdateService {
   }
 
   /// Checks GitHub Releases for a newer version than [currentVersion].
+  /// When [currentVersion] is null, queries [phone] for the real installed APK
+  /// version via Android PackageManager, falling back to [currentAppVersion].
   Future<AppUpdateInfo?> checkForUpdate({
-    String currentVersion = currentAppVersion,
+    String? currentVersion,
+    PhoneServices? phone,
   }) async {
+    var effectiveVersion = currentVersion;
+    if (effectiveVersion == null && phone != null) {
+      final native = await phone.getAppVersion();
+      if (native != null && native.version.isNotEmpty) {
+        effectiveVersion = native.version;
+      }
+    }
+    effectiveVersion ??= currentAppVersion;
+
     final client = _client ?? HttpClient();
     final shouldClose = _client == null;
     try {
@@ -122,9 +134,9 @@ class AppUpdateService {
               ? tagName.substring(1)
               : tagName;
 
-      if (!isNewerVersion(versionCandidate, currentVersion)) {
+      if (!isNewerVersion(versionCandidate, effectiveVersion)) {
         debugPrint(
-          'App is up to date: local=$currentVersion, remote=$versionCandidate',
+          'App is up to date: local=$effectiveVersion, remote=$versionCandidate',
         );
         return null;
       }

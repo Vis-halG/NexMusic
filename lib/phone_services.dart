@@ -228,6 +228,24 @@ class PhoneServices {
     return success ?? false;
   }
 
+  /// Returns the installed application version from Android's PackageManager.
+  Future<({String versionName, int buildNumber, String version})?>
+      getAppVersion() async {
+    try {
+      final res = await _channel.invokeMapMethod<String, dynamic>('getAppVersion');
+      if (res != null) {
+        final name = (res['versionName'] as String?) ?? '';
+        final build = (res['buildNumber'] as num?)?.toInt() ?? 0;
+        final ver = (res['version'] as String?) ??
+            (build > 0 ? '$name+$build' : name);
+        return (versionName: name, buildNumber: build, version: ver);
+      }
+    } catch (e) {
+      debugPrint('Error fetching installed app version: $e');
+    }
+    return null;
+  }
+
   /// Opens Android's chooser for any number of audio and video files. It
   /// returns content URIs with names and sizes and copies nothing, so a big
   /// batch cannot fill the phone. Null when the native chooser is missing.

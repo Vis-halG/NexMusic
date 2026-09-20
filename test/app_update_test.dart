@@ -11,8 +11,15 @@ void main() {
     print('Download URL: ${update?.downloadUrl}');
     print('Size: ${update?.formattedSize}');
     expect(update, isNotNull);
-    expect(update!.versionName, '0.2.1');
-    expect(update.buildNumber, 4003);
+    expect(update!.versionName.isNotEmpty, isTrue);
+    expect(update.buildNumber, greaterThan(4002));
     expect(update.downloadUrl, endsWith('.apk'));
+  });
+
+  test('isNewerVersion logic', () {
+    expect(AppUpdateService.isNewerVersion('0.2.9+4013', '0.2.9+4013'), isFalse);
+    expect(AppUpdateService.isNewerVersion('0.2.9+4013', '0.2.9+4011'), isTrue);
+    expect(AppUpdateService.isNewerVersion('0.2.9+4011', '0.2.9+4013'), isFalse);
+    expect(AppUpdateService.isNewerVersion('0.3.0', '0.2.9+4013'), isTrue);
   });
 }

@@ -157,18 +157,23 @@ Future<void> _sheet(
   );
 }
 
-void _showUpdateSheet(BuildContext context, AppUpdateInfo info) {
+void _showUpdateSheet(
+  BuildContext context,
+  AppUpdateInfo info, {
+  VoidCallback? onDismiss,
+}) {
   showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
-    builder: (sheetContext) => _UpdateSheet(info: info),
+    builder: (sheetContext) => _UpdateSheet(info: info, onDismiss: onDismiss),
   );
 }
 
 class _UpdateSheet extends StatefulWidget {
-  const _UpdateSheet({required this.info});
+  const _UpdateSheet({required this.info, this.onDismiss});
   final AppUpdateInfo info;
+  final VoidCallback? onDismiss;
 
   @override
   State<_UpdateSheet> createState() => _UpdateSheetState();
@@ -205,6 +210,8 @@ class _UpdateSheetState extends State<_UpdateSheet> {
     final installed = await service.installUpdate(file, phone);
     if (!installed && mounted) {
       await phone?.openUrl(widget.info.downloadUrl);
+    } else if (mounted) {
+      Navigator.of(context).pop();
     }
   }
 
@@ -349,7 +356,10 @@ class _UpdateSheetState extends State<_UpdateSheet> {
               const SizedBox(height: 8),
               Center(
                 child: TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
+                  onPressed: () {
+                    widget.onDismiss?.call();
+                    Navigator.of(context).pop();
+                  },
                   child: Text(
                     'Later',
                     style: TextStyle(color: mutedColor),
@@ -988,9 +998,28 @@ class _MusicShellState extends State<MusicShell> {
     try {
       await Future<void>.delayed(const Duration(milliseconds: 1500));
       if (!mounted) return;
-      final update = await AppUpdateService().checkForUpdate();
+      final controller = context.read<MusicController>();
+      final update = await AppUpdateService().checkForUpdate(
+        currentVersion: controller.installedVersion,
+        phone: controller.phone,
+      );
       if (update != null && mounted) {
-        _showUpdateSheet(context, update);
+        final lastDismissed =
+            controller.preferences.getString('dismissed_update_tag');
+        if (lastDismissed == update.tagName) {
+          debugPrint('Update ${update.tagName} was dismissed; skipping.');
+          return;
+        }
+        _showUpdateSheet(
+          context,
+          update,
+          onDismiss: () {
+            controller.preferences.setString(
+              'dismissed_update_tag',
+              update.tagName,
+            );
+          },
+        );
       }
     } catch (_) {}
   }
@@ -5315,7 +5344,7 @@ class ProfileScreen extends StatelessWidget {
             _NavRow(
               icon: Icons.system_update_rounded,
               title: 'Check for updates',
-              trailing: 'v$currentAppVersion',
+              trailing: 'v${music.installedVersion}',
               onTap: () => _manualCheckAppUpdate(context),
             ),
           _NavRow(
@@ -5330,7 +5359,7 @@ class ProfileScreen extends StatelessWidget {
           const SizedBox(height: 24),
           Center(
             child: Text(
-              'nexMusic 0.2.0',
+              'nexMusic v${music.installedVersion}',
               style: TextStyle(color: _muted(context), fontSize: 12),
             ),
           ),
@@ -5342,6 +5371,7 @@ class ProfileScreen extends StatelessWidget {
 
 Future<void> _manualCheckAppUpdate(BuildContext context) async {
   final scaffold = ScaffoldMessenger.of(context);
+  final music = context.read<MusicController>();
   scaffold.showSnackBar(
     const SnackBar(
       content: Text('Checking for updates…'),
@@ -5349,16 +5379,19 @@ Future<void> _manualCheckAppUpdate(BuildContext context) async {
     ),
   );
   try {
-    final update = await AppUpdateService().checkForUpdate();
+    final update = await AppUpdateService().checkForUpdate(
+      currentVersion: music.installedVersion,
+      phone: music.phone,
+    );
     if (!context.mounted) return;
     scaffold.hideCurrentSnackBar();
     if (update != null) {
       _showUpdateSheet(context, update);
     } else {
       scaffold.showSnackBar(
-        const SnackBar(
-          content: Text('NexMusic is up to date!'),
-          duration: Duration(seconds: 2),
+        SnackBar(
+          content: Text('NexMusic is up to date (v${music.installedVersion})!'),
+          duration: const Duration(seconds: 2),
         ),
       );
     }

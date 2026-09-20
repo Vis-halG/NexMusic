@@ -14,6 +14,7 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'app_update.dart';
 import 'music_data.dart';
 import 'music_provider.dart';
 import 'phone_services.dart';
@@ -415,9 +416,24 @@ class MusicController extends ChangeNotifier {
         }),
       );
     }
+    _initInstalledVersion();
   }
 
   final SharedPreferences _prefs;
+  SharedPreferences get preferences => _prefs;
+
+  String _installedVersion = currentAppVersion;
+  String get installedVersion => _installedVersion;
+
+  void _initInstalledVersion() {
+    phone?.getAppVersion().then((info) {
+      if (info != null && info.version.isNotEmpty) {
+        _installedVersion = info.version;
+        notifyListeners();
+      }
+    });
+  }
+
   final FirebaseAuth? _auth;
   final FirebaseFirestore? _firestore;
   final FirebaseStorage? _storage;

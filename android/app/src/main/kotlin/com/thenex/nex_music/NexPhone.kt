@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -117,6 +118,31 @@ object NexPhone {
                     result.success(true)
                 } catch (e: Exception) {
                     result.error("OPEN_URL_ERROR", e.localizedMessage, null)
+                }
+                return
+            }
+            "getAppVersion" -> {
+                try {
+                    val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        context.packageManager.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0))
+                    } else {
+                        @Suppress("DEPRECATION")
+                        context.packageManager.getPackageInfo(context.packageName, 0)
+                    }
+                    val versionName = packageInfo.versionName ?: ""
+                    val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        packageInfo.longVersionCode
+                    } else {
+                        @Suppress("DEPRECATION")
+                        packageInfo.versionCode.toLong()
+                    }
+                    result.success(mapOf(
+                        "versionName" to versionName,
+                        "buildNumber" to versionCode,
+                        "version" to if (versionCode > 0) "$versionName+$versionCode" else versionName
+                    ))
+                } catch (e: Exception) {
+                    result.error("VERSION_ERROR", e.localizedMessage, null)
                 }
                 return
             }
