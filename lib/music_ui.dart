@@ -98,6 +98,31 @@ Future<void> _openSong(
   await music.play(song, from: queue);
 }
 
+Future<void> _openSongVideo(
+  BuildContext context,
+  Song song,
+) async {
+  final music = context.read<MusicController>();
+  try {
+    await music.pauseAudio();
+    final videoSong = song.copyWith(kind: 'video');
+    final url = await music.resolvedPlayableUrl(videoSong);
+    if (!context.mounted) return;
+    _push(
+      context,
+      VideoScreen(
+        song: videoSong.copyWith(url: url),
+        httpHeaders: const {
+          'User-Agent':
+              'com.google.android.youtube/19.29.37 (Linux; U; Android 11) gzip',
+        },
+      ),
+    );
+  } catch (_) {
+    music.announce('Could not load video for this track.');
+  }
+}
+
 void _openPlayer(BuildContext context) {
   Navigator.of(context).push<void>(
     MaterialPageRoute(
@@ -1904,7 +1929,7 @@ class _SpotifyStreamView extends StatefulWidget {
 class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
   final _searchController = TextEditingController();
   final _scrollController = ScrollController();
-  String _selectedProvider = 'all'; // 'all', 'jiosaavn', 'ytmusic', 'ytvideo'
+  String _selectedProvider = 'all'; // 'all', 'jiosaavn', 'ytmusic'
   String _selectedCategory = 'Trending';
 
   static const _categories = [
@@ -1921,7 +1946,6 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
   final Map<String, List<Song>> _cachedCategories = {};
   List<Song> _jioTrending = const [];
   List<Song> _ytHits = const [];
-  List<Song> _ytVideos = const [];
   List<Song> _searchResults = const [];
   bool _loading = false;
   bool _loadingMore = false;
@@ -1966,17 +1990,14 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
       final futures = await Future.wait([
         music.fetchProviderFeatured('jiosaavn', limit: 25),
         music.fetchProviderFeatured('ytmusic', limit: 25),
-        music.fetchProviderFeatured('ytvideo', limit: 20),
       ]);
       if (!mounted) return;
       setState(() {
         _jioTrending = futures[0];
         _ytHits = futures[1];
-        _ytVideos = futures[2];
         _cachedCategories['Trending'] = [
           ...futures[0],
           ...futures[1],
-          ...futures[2],
         ];
         _loading = false;
       });
@@ -2035,8 +2056,6 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
           newSongs = await music.fetchProviderQuery('jiosaavn', query, page: _currentPage, limit: 20);
         } else if (_selectedProvider == 'ytmusic') {
           newSongs = await music.fetchProviderQuery('ytmusic', query, page: _currentPage, limit: 20);
-        } else if (_selectedProvider == 'ytvideo') {
-          newSongs = await music.fetchProviderQuery('ytvideo', query, page: _currentPage, limit: 20);
         } else {
           final res = await Future.wait([
             music.fetchProviderQuery('jiosaavn', query, page: _currentPage, limit: 12),
@@ -2048,8 +2067,6 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
         final q = '$_selectedCategory songs';
         if (_selectedProvider == 'ytmusic') {
           newSongs = await music.fetchProviderQuery('ytmusic', q, page: _currentPage, limit: 20);
-        } else if (_selectedProvider == 'ytvideo') {
-          newSongs = await music.fetchProviderQuery('ytvideo', q, page: _currentPage, limit: 20);
         } else if (_selectedProvider == 'jiosaavn') {
           newSongs = await music.fetchProviderQuery('jiosaavn', q, page: _currentPage, limit: 20);
         } else {
@@ -2062,8 +2079,6 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
       } else {
         if (_selectedProvider == 'ytmusic') {
           newSongs = await music.fetchProviderQuery('ytmusic', 'Trending Hindi Songs', page: _currentPage, limit: 20);
-        } else if (_selectedProvider == 'ytvideo') {
-          newSongs = await music.fetchProviderQuery('ytvideo', 'Popular Music Videos Hindi', page: _currentPage, limit: 20);
         } else if (_selectedProvider == 'jiosaavn') {
           newSongs = await music.fetchProviderQuery('jiosaavn', 'Top Trending Hits', page: _currentPage, limit: 20);
         } else {
@@ -2100,15 +2115,7 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
             _cachedCategories[_selectedCategory] = [...current, ...unique];
           }
         } else {
-          if (_selectedProvider == 'ytvideo') {
-            final existingYtVid = _ytVideos.map((s) => s.id).toSet();
-            final unique = newSongs.where((s) => !existingYtVid.contains(s.id)).toList();
-            if (unique.isEmpty) {
-              _hasMore = false;
-            } else {
-              _ytVideos = [..._ytVideos, ...unique];
-            }
-          } else if (_selectedProvider == 'ytmusic') {
+          if (_selectedProvider == 'ytmusic') {
             final existingYt = _ytHits.map((s) => s.id).toSet();
             final unique = newSongs.where((s) => !existingYt.contains(s.id)).toList();
             if (unique.isEmpty) {
@@ -2166,8 +2173,6 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
           results = await music.fetchProviderQuery('jiosaavn', query, limit: 25, page: 1);
         } else if (_selectedProvider == 'ytmusic') {
           results = await music.fetchProviderQuery('ytmusic', query, limit: 25, page: 1);
-        } else if (_selectedProvider == 'ytvideo') {
-          results = await music.fetchProviderQuery('ytvideo', query, limit: 25, page: 1);
         } else {
           final res = await Future.wait([
             music.fetchProviderQuery('jiosaavn', query, limit: 15, page: 1),
@@ -2292,7 +2297,7 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
           ),
         ),
 
-        // Provider Selector Pills (All / JioSaavn / YouTube Music / YouTube Videos)
+        // Provider Selector Pills (All / JioSaavn / YouTube Music)
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 8),
           child: SizedBox(
@@ -2306,8 +2311,6 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
                 _providerPill('jiosaavn', 'JioSaavn', Icons.queue_music_rounded),
                 const SizedBox(width: 8),
                 _providerPill('ytmusic', 'YouTube Music', Icons.music_note_rounded),
-                const SizedBox(width: 8),
-                _providerPill('ytvideo', 'YouTube Video', Icons.play_circle_filled_rounded),
               ],
             ),
           ),
@@ -2544,19 +2547,16 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
   Widget _buildTrendingSections(ColorScheme scheme) {
     final jio = _filterByProvider(_jioTrending);
     final yt = _filterByProvider(_ytHits);
-    final videos = _filterByProvider(_ytVideos);
 
     if (_selectedProvider != 'all') {
       final currentList = switch (_selectedProvider) {
         'jiosaavn' => jio,
         'ytmusic' => yt,
-        'ytvideo' => videos,
         _ => <Song>[],
       };
       final providerName = switch (_selectedProvider) {
         'jiosaavn' => 'JioSaavn',
         'ytmusic' => 'YouTube Music',
-        'ytvideo' => 'YouTube Videos',
         _ => '',
       };
       if (currentList.isEmpty) {
@@ -2613,12 +2613,6 @@ class _SpotifyStreamViewState extends State<_SpotifyStreamView> {
             title: 'YouTube Music Hot Tracks',
             subtitle: 'Global & trending stream releases',
             songs: yt,
-          ),
-        if (videos.isNotEmpty)
-          _SpotifySection(
-            title: 'Trending Music Videos',
-            subtitle: 'Stream popular YouTube music videos',
-            songs: videos,
           ),
       ],
     );
@@ -4622,6 +4616,17 @@ class MiniPlayer extends StatelessWidget {
                               : scheme.onSurfaceVariant,
                         ),
                       ),
+                    if (song.providerId == 'ytmusic' || song.sourceId.isNotEmpty)
+                      IconButton(
+                        tooltip: 'Watch Video',
+                        iconSize: 22,
+                        visualDensity: VisualDensity.compact,
+                        onPressed: () => _openSongVideo(context, song),
+                        icon: const Icon(
+                          Icons.smart_display_rounded,
+                          color: NexMusicApp.violet,
+                        ),
+                      ),
                     IconButton(
                       tooltip: state.playing ? 'Pause' : 'Play',
                       iconSize: 30,
@@ -4713,6 +4718,27 @@ class NowPlayingScreen extends StatelessWidget {
           'Now playing',
           style: TextStyle(fontSize: 14, color: muted),
         ),
+        actions: [
+          if (song != null && (song.providerId == 'ytmusic' || song.sourceId.isNotEmpty))
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: TextButton.icon(
+                onPressed: () => _openSongVideo(context, song),
+                icon: const Icon(
+                  Icons.smart_display_rounded,
+                  size: 20,
+                  color: NexMusicApp.violet,
+                ),
+                label: const Text(
+                  'Video',
+                  style: TextStyle(
+                    color: NexMusicApp.violet,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
       body: song == null
           ? const _EmptyState(
@@ -4739,8 +4765,39 @@ class NowPlayingScreen extends StatelessWidget {
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          _Thumb(icon: Icons.music_note_rounded, size: art),
-                          const SizedBox(height: 32),
+                          _Thumb(
+                            icon: Icons.music_note_rounded,
+                            size: art,
+                            imageUrl: song.artworkUrl,
+                          ),
+                          if (song.providerId == 'ytmusic' || song.sourceId.isNotEmpty) ...[
+                            const SizedBox(height: 16),
+                            FilledButton.tonalIcon(
+                              onPressed: () => _openSongVideo(context, song),
+                              icon: const Icon(Icons.smart_display_rounded, size: 20),
+                              label: const Text(
+                                'Watch Music Video',
+                                style: TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                              style: FilledButton.styleFrom(
+                                backgroundColor:
+                                    NexMusicApp.violet.withValues(alpha: 0.15),
+                                foregroundColor: NexMusicApp.violet,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 20,
+                                  vertical: 10,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(24),
+                                  side: const BorderSide(
+                                    color: NexMusicApp.violet,
+                                    width: 1.2,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 24),
                           Row(
                             children: [
                               Expanded(
