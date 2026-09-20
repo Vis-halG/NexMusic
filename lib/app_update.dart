@@ -8,7 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'phone_services.dart';
 
 /// Fallback installed version of NexMusic (matches pubspec.yaml).
-const String currentAppVersion = '0.2.9+4015';
+const String currentAppVersion = '0.2.9+4016';
 
 class AppUpdateInfo {
   const AppUpdateInfo({
@@ -92,14 +92,18 @@ class AppUpdateService {
     String? currentVersion,
     PhoneServices? phone,
   }) async {
-    var effectiveVersion = currentVersion;
-    if (effectiveVersion == null && phone != null) {
-      final native = await phone.getAppVersion();
-      if (native != null && native.version.isNotEmpty) {
-        effectiveVersion = native.version;
+    String? effectiveVersion;
+    if (phone != null) {
+      try {
+        final native = await phone.getAppVersion();
+        if (native != null && native.version.isNotEmpty) {
+          effectiveVersion = native.version;
+        }
+      } catch (e) {
+        debugPrint('Failed to get native version: $e');
       }
     }
-    effectiveVersion ??= currentAppVersion;
+    effectiveVersion ??= currentVersion ?? currentAppVersion;
 
     final client = _client ?? HttpClient();
     final shouldClose = _client == null;

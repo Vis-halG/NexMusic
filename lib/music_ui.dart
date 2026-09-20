@@ -975,7 +975,7 @@ class MusicShell extends StatefulWidget {
   State<MusicShell> createState() => _MusicShellState();
 }
 
-class _MusicShellState extends State<MusicShell> {
+class _MusicShellState extends State<MusicShell> with WidgetsBindingObserver {
   StreamSubscription<List<SharedMediaFile>>? _shareSubscription;
   StreamSubscription<String>? _launchSubscription;
   Timer? _updateTimer;
@@ -983,6 +983,7 @@ class _MusicShellState extends State<MusicShell> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     if (kIsWeb) return;
     final phone = context.read<MusicController>().phone;
     _launchSubscription = phone?.launchActions.listen(_runLaunchAction);
@@ -1002,6 +1003,13 @@ class _MusicShellState extends State<MusicShell> {
     });
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkAutoUpdate();
+    }
+  }
+
   void _checkAutoUpdate() {
     if (!mounted || kIsWeb) return;
     _updateTimer?.cancel();
@@ -1010,9 +1018,9 @@ class _MusicShellState extends State<MusicShell> {
       try {
         final controller = context.read<MusicController>();
         final update = await AppUpdateService().checkForUpdate(
-          currentVersion: controller.installedVersion,
           phone: controller.phone,
         );
+        debugPrint('Auto update check result: ${update?.displayVersion}');
         if (update != null && mounted) {
           final lastDismissed =
               controller.preferences.getString('dismissed_update_tag');
@@ -1031,7 +1039,9 @@ class _MusicShellState extends State<MusicShell> {
             },
           );
         }
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('Auto update check error: $e');
+      }
     });
   }
 
@@ -1129,6 +1139,7 @@ class _MusicShellState extends State<MusicShell> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _updateTimer?.cancel();
     _shareSubscription?.cancel();
     _launchSubscription?.cancel();
@@ -5800,8 +5811,8 @@ Future<void> _manualCheckAppUpdate(BuildContext context) async {
     ),
   );
   try {
+    await music.preferences.remove('dismissed_update_tag');
     final update = await AppUpdateService().checkForUpdate(
-      currentVersion: music.installedVersion,
       phone: music.phone,
     );
     if (!context.mounted) return;
