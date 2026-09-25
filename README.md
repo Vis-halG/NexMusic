@@ -251,7 +251,6 @@ lib/app_update.dart        in-app GitHub releases checker, APK downloader & inst
 lib/phone_services.dart    lock screen controls, widgets, notifications, push
 android/.../MainActivity.kt  trim/extract channel and widget launch actions
 android/.../NexPhone.kt    progress and activity notifications, native package version
-android/.../NexWidgets.kt  home screen widgets
 push_worker/worker.js      Cloudflare Worker that sends activity notifications
 tool/small_apk/            builds the small APK to share
 .github/workflows/release.yml GitHub Actions pipeline that auto-builds & publishes APK releases
