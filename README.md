@@ -4,7 +4,7 @@ Flutter app for shared music, online songs, videos and movie discovery.
 Signed-in listeners can upload songs and videos into shared categories. Files
 are stored on Cloudinary; Firebase handles login and the shared listing.
 
-Version `0.3.0+4018` adds Movies before Profile, a combined JioSaavn + YouTube
+Version `0.3.0+8018` adds Movies before Profile, a combined JioSaavn + YouTube
 Music feed, Quick Picks, similar-song radio, and a YouTube video filter. MovieBox
 supplies the live movie catalogue, search and related titles; Watch opens its
 own web player inside nexApp. Search displays the provider's public first page.
@@ -15,6 +15,12 @@ Public app names, desktop windows and release APKs use `nexApp`. Registered
 Android/iOS bundle IDs, signing keys, Firebase project, notification channels,
 Cloudinary folders and existing device storage keys retain their original IDs
 so this release updates existing installations and keeps their data.
+
+Build 8018 also fixes the previous split-APK version mismatch. Flutter added
+ABI offsets to older APKs (the published 4017 arm64 APK reports 6017), while
+the updater compared the unadjusted release tag. All APKs now use the exact
+pubspec build number, above the previous ABI-specific codes. CI checks the
+packaged version and app label before publishing each release.
 
 See [APK analysis and integration notes](docs/apk-analysis.md) for evidence,
 provider limitations and live checks.
