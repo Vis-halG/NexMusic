@@ -8,7 +8,7 @@
     <!-- In-app APK updates without needing manual browser installs -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <application
-        android:label="nexMusic"
+        android:label="nexApp"
         android:name="${applicationName}"
         android:networkSecurityConfig="@xml/network_security_config"
         android:icon="@mipmap/ic_launcher">
@@ -33,7 +33,7 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
-            <!-- Makes nexMusic appear in supported Android share sheets. -->
+            <!-- Makes nexApp appear in supported Android share sheets. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND"/>
                 <category android:name="android.intent.category.DEFAULT"/>

@@ -1,4 +1,4 @@
-// nexMusic activity notifications, deployed as a Cloudflare Worker.
+// nexApp activity notifications, deployed as a Cloudflare Worker.
 //
 // The app POSTs {"title", "body"} with the signed-in user's Firebase ID token
 // in the Authorization header. The Worker checks the token, then sends the
@@ -35,7 +35,7 @@ export default {
       const header = request.headers.get('Authorization') || '';
       senderUid = await verifyIdToken(header.replace(/^Bearer\s+/i, ''), projectId);
     } catch {
-      return reply({ error: 'Sign in to nexMusic first.' }, 401);
+      return reply({ error: 'Sign in to nexApp first.' }, 401);
     }
 
     let input;

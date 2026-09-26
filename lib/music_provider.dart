@@ -27,7 +27,7 @@ abstract class MusicProvider {
   Future<List<Song>> loadRadio(String sourceId, {int limit = 25});
 }
 
-/// JioSaavn source used by the provider bundle discovered in the reference APK.
+/// JioSaavn catalogue and song radio source.
 ///
 /// Search results do not contain a directly playable URL. The service returns
 /// an encrypted media address, so it is resolved only when playback/download
@@ -63,7 +63,11 @@ class JioSaavnProvider implements MusicProvider {
   }
 
   @override
-  Future<List<Song>> searchSongs(String query, {int limit = 20, int page = 1}) async {
+  Future<List<Song>> searchSongs(
+    String query, {
+    int limit = 20,
+    int page = 1,
+  }) async {
     final value = query.trim();
     if (value.isEmpty) return const [];
     final data = await _fetchJson(
@@ -116,7 +120,38 @@ class JioSaavnProvider implements MusicProvider {
 
   @override
   Future<List<Song>> loadRadio(String sourceId, {int limit = 25}) async {
-    return loadFeatured(limit: limit);
+    if (sourceId.trim().isEmpty) return const [];
+    final station = await _fetchJson(
+      _uri({
+        '__call': 'webradio.createEntityStation',
+        'ctx': 'android',
+        'entity_id': jsonEncode([sourceId]),
+        'entity_type': 'queue',
+      }),
+    );
+    final stationId = _string(station['stationid']);
+    if (stationId.isEmpty) return const [];
+    final data = await _fetchJson(
+      _uri({
+        '__call': 'webradio.getSong',
+        'ctx': 'android',
+        'stationid': stationId,
+        'k': '${limit.clamp(1, 50)}',
+        'next': '1',
+      }),
+    );
+    final songs = <Song>[];
+    final seen = <String>{sourceId};
+    for (final value in [
+      if (data['song'] is Map) data,
+      ...data.values.whereType<Map>(),
+    ]) {
+      final raw = value['song'];
+      if (raw is! Map) continue;
+      final song = _songFrom(Map<String, dynamic>.from(raw));
+      if (song != null && seen.add(song.sourceId)) songs.add(song);
+    }
+    return songs.take(limit).toList();
   }
 
   Song? _songFrom(Map<String, dynamic> item) {
@@ -270,12 +305,17 @@ class YouTubeMusicProvider implements MusicProvider {
   final Map<String, String> _continuations = {};
 
   @override
-  Future<List<Song>> searchSongs(String query, {int limit = 20, int page = 1}) async {
+  Future<List<Song>> searchSongs(
+    String query, {
+    int limit = 20,
+    int page = 1,
+  }) async {
     final value = query.trim();
     if (value.isEmpty) return const [];
 
     final cacheKey = '$value:$page';
     final token = page > 1 ? _continuations[cacheKey] : null;
+    if (page > 1 && token == null) return const [];
 
     final Uri searchUri;
     final Map<String, dynamic> payload;
@@ -311,20 +351,16 @@ class YouTubeMusicProvider implements MusicProvider {
           },
           'user': <String, dynamic>{},
         },
-        'query': page > 1 ? '$value part $page' : value,
+        'query': value,
         'params': _trackSearchParams,
       };
     }
 
-    final data = await _postJson(
-      searchUri,
-      payload,
-      const {
-        HttpHeaders.userAgentHeader: _webUserAgent,
-        'Origin': 'https://music.youtube.com',
-        'Referer': 'https://music.youtube.com/',
-      },
-    );
+    final data = await _postJson(searchUri, payload, const {
+      HttpHeaders.userAgentHeader: _webUserAgent,
+      'Origin': 'https://music.youtube.com',
+      'Referer': 'https://music.youtube.com/',
+    });
 
     final nextToken = _extractContinuationToken(data);
     if (nextToken != null && nextToken.isNotEmpty) {
@@ -657,12 +693,17 @@ class YouTubeVideoProvider implements MusicProvider {
   final Map<String, String> _continuations = {};
 
   @override
-  Future<List<Song>> searchSongs(String query, {int limit = 20, int page = 1}) async {
+  Future<List<Song>> searchSongs(
+    String query, {
+    int limit = 20,
+    int page = 1,
+  }) async {
     final value = query.trim();
     if (value.isEmpty) return const [];
 
     final cacheKey = '$value:$page';
     final token = page > 1 ? _continuations[cacheKey] : null;
+    if (page > 1 && token == null) return const [];
 
     final Uri searchUri;
     final Map<String, dynamic> payload;
@@ -698,20 +739,16 @@ class YouTubeVideoProvider implements MusicProvider {
           },
           'user': <String, dynamic>{},
         },
-        'query': page > 1 ? '$value part $page' : value,
+        'query': value,
         'params': 'EgIQAQ%3D%3D',
       };
     }
 
-    final data = await _postJson(
-      searchUri,
-      payload,
-      const {
-        HttpHeaders.userAgentHeader: _webUserAgent,
-        'Origin': 'https://www.youtube.com',
-        'Referer': 'https://www.youtube.com/',
-      },
-    );
+    final data = await _postJson(searchUri, payload, const {
+      HttpHeaders.userAgentHeader: _webUserAgent,
+      'Origin': 'https://www.youtube.com',
+      'Referer': 'https://www.youtube.com/',
+    });
 
     final nextToken = _extractVideoContinuationToken(data);
     if (nextToken != null && nextToken.isNotEmpty) {
@@ -812,10 +849,9 @@ class YouTubeVideoProvider implements MusicProvider {
 
   @override
   Future<List<Song>> loadRadio(String sourceId, {int limit = 25}) async {
-    return YouTubeMusicProvider(postJson: _postJson).loadRadio(
-      sourceId,
-      limit: limit,
-    );
+    return YouTubeMusicProvider(
+      postJson: _postJson,
+    ).loadRadio(sourceId, limit: limit);
   }
 }
 

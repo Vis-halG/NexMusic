@@ -16,6 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_update.dart';
 import 'music_data.dart';
+import 'music_discovery.dart';
 import 'music_provider.dart';
 import 'phone_services.dart';
 
@@ -453,6 +454,7 @@ class MusicController extends ChangeNotifier {
   final AudioPlayer _audio;
   final NexAudioHandler? _audioHandler;
   final List<MusicProvider> _musicProviders;
+  late final MusicDiscovery discovery = MusicDiscovery(_musicProviders);
 
   /// Widgets, notifications and push on Android; null in tests.
   final PhoneServices? phone;
@@ -474,8 +476,7 @@ class MusicController extends ChangeNotifier {
     if (_recentStreamSongs.length > 25) {
       _recentStreamSongs.removeRange(25, _recentStreamSongs.length);
     }
-    final raw =
-        _recentStreamSongs.map((s) => jsonEncode(s.toJson())).toList();
+    final raw = _recentStreamSongs.map((s) => jsonEncode(s.toJson())).toList();
     unawaited(_prefs.setStringList('recent_stream_history', raw));
   }
 
@@ -754,7 +755,6 @@ class MusicController extends ChangeNotifier {
     }
   }
 
-
   List<Song> songsIn(String? categoryId) => categoryId == null
       ? songs
       : songs.where((song) => song.categoryId == categoryId).toList();
@@ -891,7 +891,7 @@ class MusicController extends ChangeNotifier {
     final title = switch ((done.length, failed)) {
       _ when cancelled > 0 && done.isEmpty => 'Uploads cancelled',
       _ when cancelled > 0 => '${done.length} uploaded, the rest cancelled',
-      (0, 0) => 'Already in nexMusic',
+      (0, 0) => 'Already in nexApp',
       (1, 0) => 'Upload finished',
       (final ok, 0) => '$ok uploads finished',
       (final ok, final bad) => '$ok uploaded, $bad failed',
@@ -971,7 +971,7 @@ class MusicController extends ChangeNotifier {
   Future<void> play(Song song, {List<Song>? from}) async {
     if (song.isVideo) return;
     if (isStreamingLink(song.url)) {
-      notice = 'Streaming links (m3u8, mpd, rtsp) can’t be played in nexMusic.';
+      notice = 'Streaming links (m3u8, mpd, rtsp) can’t be played in nexApp.';
       notifyListeners();
       return;
     }
@@ -1035,6 +1035,7 @@ class MusicController extends ChangeNotifier {
       if (song.isProvider) {
         try {
           final radioTracks = await fetchRadioForSong(song, limit: 10);
+          if (current?.id != song.id) return;
           final newTracks = radioTracks.where((t) => t.id != song.id).toList();
           if (newTracks.isNotEmpty) {
             queue = [song, ...newTracks];
@@ -1052,9 +1053,11 @@ class MusicController extends ChangeNotifier {
     if (!shuffle && index >= queue.length - 1 && song.isProvider) {
       try {
         final radioTracks = await fetchRadioForSong(song, limit: 10);
+        if (current?.id != song.id) return;
         final existingIds = queue.map((s) => s.id).toSet();
-        final newTracks =
-            radioTracks.where((t) => !existingIds.contains(t.id)).toList();
+        final newTracks = radioTracks
+            .where((t) => !existingIds.contains(t.id))
+            .toList();
         if (newTracks.isNotEmpty) {
           queue = [...queue, ...newTracks];
           notifyListeners();
@@ -1069,40 +1072,19 @@ class MusicController extends ChangeNotifier {
     await play(queue[nextIndex], from: queue);
   }
 
-  // ── YouTube Music Recommendations & Radio ─────────────────────────────────
+  // Recommendations and radio from both music providers.
 
-  /// Fetches official YouTube Music radio recommendations for [song].
-  Future<List<Song>> fetchRadioForSong(Song song, {int limit = 25}) async {
-    final yt = _musicProviders.whereType<YouTubeMusicProvider>().firstOrNull ??
-        _musicProviders.firstWhere(
-          (p) => p.id == 'ytmusic',
-          orElse: () => _musicProviders.first,
-        );
+  /// Recommendations from both music catalogues, using the same seed track.
+  Future<List<Song>> fetchRadioForSong(Song song, {int limit = 25}) =>
+      discovery.radio(song, limit: limit);
 
-    if (song.providerId == 'ytmusic' || song.providerId == 'ytvideo') {
-      final radio = await yt.loadRadio(song.sourceId, limit: limit);
-      if (radio.isNotEmpty) return radio;
-    }
-
-    try {
-      final query = '${song.title} ${song.artist}'.trim();
-      final results = await yt.searchSongs(query, limit: 1);
-      if (results.isNotEmpty) {
-        final radio = await yt.loadRadio(results.first.sourceId, limit: limit);
-        if (radio.isNotEmpty) return radio;
-      }
-    } catch (_) {}
-
-    return fetchProviderQuery('ytmusic', '${song.artist} songs', limit: limit);
-  }
-
-  /// Plays [song] and loads YouTube Music Radio recommendations into the queue.
+  /// Plays [song] and loads recommendations from both providers into the queue.
   Future<void> startRadio(Song song) async {
     await play(song);
     try {
       final radioTracks = await fetchRadioForSong(song, limit: 30);
       final filtered = radioTracks.where((t) => t.id != song.id).toList();
-      if (filtered.isNotEmpty) {
+      if (filtered.isNotEmpty && current?.id == song.id) {
         queue = [song, ...filtered];
         notifyListeners();
       }
@@ -1113,7 +1095,7 @@ class MusicController extends ChangeNotifier {
 
   /// Returns songs similar to the user's last played stream track.
   Future<({String title, String artist, Song seedSong, List<Song> songs})?>
-      fetchSimilarToLastPlayed({int limit = 20}) async {
+  fetchSimilarToLastPlayed({int limit = 20}) async {
     final seed = (current != null && current!.isProvider)
         ? current!
         : (_recentStreamSongs.isNotEmpty ? _recentStreamSongs.first : null);
@@ -1133,25 +1115,16 @@ class MusicController extends ChangeNotifier {
   }
 
   /// Builds a personalized Quick Picks list based on recent stream tracks,
-  /// falling back to YouTube Music trending home tracks.
+  /// falling back to a mix of both providers' featured tracks.
   Future<List<Song>> fetchQuickPicks({int limit = 20}) async {
     if (_recentStreamSongs.isNotEmpty) {
       final sample = _recentStreamSongs.take(3).toList();
       final futures = sample.map((s) => fetchRadioForSong(s, limit: 8));
       final candidateLists = await Future.wait(futures);
-      final combined = <Song>[];
-      final seen = <String>{};
-      for (final list in candidateLists) {
-        for (final song in list) {
-          if (seen.add(song.id)) combined.add(song);
-        }
-      }
-      if (combined.isNotEmpty) {
-        combined.shuffle();
-        return combined.take(limit).toList();
-      }
+      final combined = mergeMusicResults(candidateLists, limit: limit);
+      if (combined.isNotEmpty) return combined;
     }
-    return fetchProviderFeatured('ytmusic', limit: limit);
+    return (await discovery.browse(limit: limit)).songs.take(limit).toList();
   }
 
   Future<void> previous() async {
@@ -1651,7 +1624,7 @@ class MusicController extends ChangeNotifier {
     await _drainUploads();
   }
 
-  /// Stops the batch for good. Songs already in nexMusic stay; the rest are
+  /// Stops the batch for good. Songs already in nexApp stay; the rest are
   /// not sent.
   void cancelUploads() {
     if (!uploading) return;

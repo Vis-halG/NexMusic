@@ -1,6 +1,6 @@
 // ignore_for_file: avoid_print
 import 'package:flutter_test/flutter_test.dart';
-import 'package:nex_music/app_update.dart';
+import 'package:nex_app/app_update.dart';
 
 void main() {
   test('live GitHub update check', () async {
