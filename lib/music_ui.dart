@@ -19,7 +19,6 @@ import 'media_library.dart';
 import 'music_controller.dart';
 import 'music_data.dart';
 import 'music_discovery.dart';
-import 'movie_ui.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -74,7 +73,6 @@ Future<void> _openSong(
     try {
       final url = await music.resolvedPlayableUrl(song);
       if (!context.mounted) return;
-      music.recordVideoPlay(song);
       _push(
         context,
         VideoScreen(
@@ -1165,8 +1163,7 @@ class _MusicShellState extends State<MusicShell> with WidgetsBindingObserver {
     final Widget currentView = switch (_currentTabIndex) {
       1 => const _SpotifyStreamView(),
       2 => const _SpotifyLibraryView(),
-      3 => const MoviesScreen(),
-      4 => const ProfileScreen(showAppBar: false),
+      3 => const ProfileScreen(showAppBar: false),
       _ => const _SpotifyHomeView(),
     };
 
@@ -1209,11 +1206,6 @@ class _MusicShellState extends State<MusicShell> with WidgetsBindingObserver {
                   color: NexApp.violet,
                 ),
                 label: 'Library',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.movie_outlined),
-                selectedIcon: Icon(Icons.movie_rounded, color: NexApp.violet),
-                label: 'Movies',
               ),
               NavigationDestination(
                 icon: Icon(Icons.person_outline_rounded),
@@ -1602,7 +1594,7 @@ class _SpotifyHomeViewState extends State<_SpotifyHomeView> {
       if (!mounted) return;
       final music = context.read<MusicController>();
       if (music.providerSongs.isEmpty && !music.providerLoading) {
-        music.loadProviderHome('ytmusic');
+        music.loadDiscoveryHome();
       }
     });
   }
@@ -1610,16 +1602,11 @@ class _SpotifyHomeViewState extends State<_SpotifyHomeView> {
   @override
   Widget build(BuildContext context) {
     final music = context.watch<MusicController>();
-    final recentSongs = music.librarySongs(MediaCollection.recent);
-    final likedSongs = music.librarySongs(MediaCollection.likedSongs);
     final allSongs = music.songs;
 
     return RefreshIndicator(
       onRefresh: () async {
-        await Future.wait([
-          music.refreshCatalog(),
-          music.loadProviderHome('ytmusic'),
-        ]);
+        await Future.wait([music.refreshCatalog(), music.loadDiscoveryHome()]);
       },
       child: CustomScrollView(
         slivers: [
@@ -1798,24 +1785,14 @@ class _SpotifyHomeViewState extends State<_SpotifyHomeView> {
                           gradient: const LinearGradient(
                             colors: [Color(0xFF8B5CF6), Color(0xFF4C1D95)],
                           ),
-                          onTap: () {
-                            if (likedSongs.isNotEmpty) {
-                              _openSong(
-                                context,
-                                likedSongs.first,
-                                queue: likedSongs,
-                              );
-                            } else {
-                              _push(
-                                context,
-                                SongListScreen(
-                                  title: 'Liked Songs',
-                                  emptyText: 'No liked songs yet.',
-                                  select: (m) => m.likedSongs,
-                                ),
-                              );
-                            }
-                          },
+                          onTap: () => _push(
+                            context,
+                            SongListScreen(
+                              title: 'Liked Songs',
+                              emptyText: 'No liked songs yet.',
+                              select: (m) => m.likedSongs,
+                            ),
+                          ),
                         ),
                         _SpotifyQuickTile(
                           title: 'Recently Played',
@@ -1823,16 +1800,43 @@ class _SpotifyHomeViewState extends State<_SpotifyHomeView> {
                           gradient: const LinearGradient(
                             colors: [Color(0xFF3B82F6), Color(0xFF1E3A8A)],
                           ),
-                          onTap: () {
-                            if (recentSongs.isNotEmpty) {
-                              _openSong(
-                                context,
-                                recentSongs.first,
-                                queue: recentSongs,
-                              );
-                            }
-                          },
+                          onTap: () => _push(
+                            context,
+                            SongListScreen(
+                              title: 'Recently Played',
+                              emptyText: 'Play a song to start your history.',
+                              select: (m) =>
+                                  m.librarySongs(MediaCollection.recent),
+                            ),
+                          ),
                         ),
+                        for (final (collection, title, icon) in const [
+                          (
+                            MediaCollection.mostPlayed,
+                            'Most Played',
+                            Icons.bar_chart_rounded,
+                          ),
+                          (
+                            MediaCollection.neverPlayed,
+                            'Never Played',
+                            Icons.explore_outlined,
+                          ),
+                        ])
+                          _SpotifyQuickTile(
+                            title: title,
+                            icon: icon,
+                            onTap: () => _push(
+                              context,
+                              SongListScreen(
+                                title: title,
+                                emptyText:
+                                    collection == MediaCollection.mostPlayed
+                                    ? 'Your most played songs will appear here.'
+                                    : 'No unplayed songs available yet.',
+                                select: (m) => m.librarySongs(collection),
+                              ),
+                            ),
+                          ),
                         _SpotifyQuickTile(
                           title: 'Downloads',
                           icon: Icons.offline_pin_rounded,
@@ -1926,12 +1930,12 @@ class _SpotifyHomeViewState extends State<_SpotifyHomeView> {
                   ),
                 ),
 
-            // YOUTUBE MUSIC & ONLINE SECTION
+            // Recommendations from both online music catalogues.
             if (music.providerSongs.isNotEmpty)
               SliverToBoxAdapter(
                 child: _SpotifySection(
-                  title: 'YouTube Music Highlights',
-                  subtitle: 'Top online streams',
+                  title: 'Music Highlights',
+                  subtitle: 'JioSaavn + YouTube Music',
                   songs: music.providerSongs,
                 ),
               ),
@@ -4927,6 +4931,7 @@ class _VideoScreenState extends State<VideoScreen> {
     try {
       await _video.initialize();
       await _video.play();
+      if (mounted) context.read<MusicController>().recordVideoPlay(widget.song);
     } catch (_) {
       if (mounted) setState(() => _failed = true);
     }

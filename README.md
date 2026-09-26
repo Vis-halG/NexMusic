@@ -1,14 +1,14 @@
 # nexApp
 
-Flutter app for shared music, online songs, videos and movie discovery.
+Flutter app for shared music, online songs and videos.
 Signed-in listeners can upload songs and videos into shared categories. Files
 are stored on Cloudinary; Firebase handles login and the shared listing.
 
-Version `0.3.0+8018` adds Movies before Profile, a combined JioSaavn + YouTube
-Music feed, Quick Picks, similar-song radio, and a YouTube video filter. MovieBox
-supplies the live movie catalogue, search and related titles; Watch opens its
-own web player inside nexApp. Search displays the provider's public first page.
-Playback availability, episodes and subtitles are controlled by MovieBox.
+Version `0.3.2+8020` has four tabs: Home, Stream, Library and Profile. Home
+groups songs and videos into recently played/watched, liked, most played and
+never played collections. Stream combines JioSaavn and YouTube Music with
+Quick Picks, song radio and a YouTube video filter. Movie discovery and its
+player have been removed.
 
 The repository is now [Vis-halG/nexApp](https://github.com/Vis-halG/nexApp).
 Public app names, desktop windows and release APKs use `nexApp`. Registered

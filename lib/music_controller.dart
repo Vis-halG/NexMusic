@@ -438,7 +438,7 @@ class MusicController extends ChangeNotifier {
   final SharedPreferences _prefs;
   SharedPreferences get preferences => _prefs;
 
-  /// Device-local history and likes shared by songs, videos and movies.
+  /// Device-local history and likes shared by music and video sources.
   late final MediaLibrary library;
 
   String _installedVersion = currentAppVersion;
@@ -594,8 +594,7 @@ class MusicController extends ChangeNotifier {
     return words.take(2).map((word) => word[0].toUpperCase()).join();
   }
 
-  List<Song> get likedSongs =>
-      songs.where((song) => liked.contains(song.id)).toList();
+  List<Song> get likedSongs => librarySongs(MediaCollection.likedSongs);
   List<Song> get recentSongs =>
       recentSongIds.map(songById).whereType<Song>().toList();
   List<Song> get myUploads {
@@ -633,6 +632,22 @@ class MusicController extends ChangeNotifier {
   }
 
   bool hasProvider(String id) => _providerById(id) != null;
+
+  Future<void> loadDiscoveryHome() async {
+    final request = ++_providerRequest;
+    providerLoading = true;
+    providerError = null;
+    notifyListeners();
+    final result = await discovery.browse();
+    if (request != _providerRequest) return;
+    providerSongs = result.songs;
+    library.rememberSongs(result.songs);
+    providerError = result.songs.isEmpty && result.unavailable.isNotEmpty
+        ? 'Online music could not load. Pull down to retry.'
+        : null;
+    providerLoading = false;
+    notifyListeners();
+  }
 
   String providerNameFor(String id) =>
       _providerById(id)?.displayName ?? 'Online music';
@@ -983,7 +998,6 @@ class MusicController extends ChangeNotifier {
       return;
     }
     current = song;
-    library.recordSongPlay(song);
     if (song.isProvider) {
       _recordStreamSong(song);
     } else if (!song.isPrivate) {
@@ -1011,6 +1025,8 @@ class MusicController extends ChangeNotifier {
       // just_audio sends custom headers through its local 127.0.0.1 proxy,
       // which network_security_config.xml allows over cleartext.
       await _audio.setUrl(url, headers: headers.isEmpty ? null : headers);
+      if (current?.id != song.id) return;
+      library.recordSongPlay(song);
       // play() only completes when playback stops, so it is not awaited.
       unawaited(_audio.play());
     } on PlayerInterruptedException {
@@ -1160,12 +1176,10 @@ class MusicController extends ChangeNotifier {
   }
 
   /// Songs and videos (from every source) in one Home collection.
-  List<Song> librarySongs(MediaCollection collection) => library
-      .collection(collection)
-      .map((item) => item.song)
-      .whereType<Song>()
-      .take(50)
-      .toList();
+  List<Song> librarySongs(MediaCollection collection) {
+    library.rememberSongs([...songs, ..._recentStreamSongs, ...providerSongs]);
+    return library.collection(collection).map((item) => item.song).toList();
+  }
 
   /// Videos play in their own screen, outside [play].
   void recordVideoPlay(Song song) => library.recordSongPlay(song);
@@ -2837,6 +2851,7 @@ class MusicController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _providerRequest++;
     for (final subscription in [..._subs, ..._catalogSubs]) {
       subscription.cancel();
     }

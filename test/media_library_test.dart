@@ -30,7 +30,7 @@ void main() {
     await library.saved;
 
     List<String> ids(MediaLibrary l, MediaCollection c) =>
-        l.collection(c).map((e) => e.song!.id).toList();
+        l.collection(c).map((e) => e.song.id).toList();
 
     expect(ids(library, MediaCollection.mostPlayed).first, 'y1');
     expect(ids(library, MediaCollection.watched), ['v1']);
