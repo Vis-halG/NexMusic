@@ -15,6 +15,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import 'app_update.dart';
 import 'main.dart';
+import 'media_library.dart';
 import 'music_controller.dart';
 import 'music_data.dart';
 import 'music_discovery.dart';
@@ -73,6 +74,7 @@ Future<void> _openSong(
     try {
       final url = await music.resolvedPlayableUrl(song);
       if (!context.mounted) return;
+      music.recordVideoPlay(song);
       _push(
         context,
         VideoScreen(
@@ -1608,8 +1610,8 @@ class _SpotifyHomeViewState extends State<_SpotifyHomeView> {
   @override
   Widget build(BuildContext context) {
     final music = context.watch<MusicController>();
-    final recentSongs = music.recentSongs;
-    final likedSongs = music.likedSongs;
+    final recentSongs = music.librarySongs(MediaCollection.recent);
+    final likedSongs = music.librarySongs(MediaCollection.likedSongs);
     final allSongs = music.songs;
 
     return RefreshIndicator(
@@ -1878,18 +1880,25 @@ class _SpotifyHomeViewState extends State<_SpotifyHomeView> {
               ),
             ),
 
-            // SECTION: Recently Played
-            if (recentSongs.isNotEmpty)
+            // SECTIONS: history and likes mixed across JioSaavn, YouTube
+            // and the shared catalogue.
+            for (final (collection, title) in const [
+              (MediaCollection.recent, 'Recently Played'),
+              (MediaCollection.watched, 'Recently Watched'),
+              (MediaCollection.likedSongs, 'Liked Songs'),
+              (MediaCollection.mostPlayed, 'Most Played'),
+              (MediaCollection.neverPlayed, 'Never Played'),
+            ])
               SliverToBoxAdapter(
                 child: _SpotifySection(
-                  title: 'Recently Played',
-                  songs: recentSongs,
+                  title: title,
+                  songs: music.librarySongs(collection),
                   onSeeAll: () => _push(
                     context,
                     SongListScreen(
-                      title: 'Recently Played',
-                      emptyText: 'No recent history.',
-                      select: (m) => m.recentSongs,
+                      title: title,
+                      emptyText: 'Nothing here yet.',
+                      select: (m) => m.librarySongs(collection),
                     ),
                   ),
                 ),

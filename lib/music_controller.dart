@@ -15,6 +15,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_update.dart';
+import 'media_library.dart';
 import 'music_data.dart';
 import 'music_discovery.dart';
 import 'music_provider.dart';
@@ -339,6 +340,7 @@ class MusicController extends ChangeNotifier {
       throw ArgumentError.value(_musicProviders, 'musicProviders');
     }
     activeProviderId = _musicProviders.first.id;
+    library = MediaLibrary(_prefs)..addListener(notifyListeners);
     signedIn = _auth?.currentUser != null;
     pushEnabled = _prefs.getBool('pushEnabled') ?? true;
     // Lock screen and notification buttons follow the app's own queue.
@@ -435,6 +437,9 @@ class MusicController extends ChangeNotifier {
 
   final SharedPreferences _prefs;
   SharedPreferences get preferences => _prefs;
+
+  /// Device-local history and likes shared by songs, videos and movies.
+  late final MediaLibrary library;
 
   String _installedVersion = currentAppVersion;
   String get installedVersion => _installedVersion;
@@ -667,6 +672,7 @@ class MusicController extends ChangeNotifier {
       final results = await provider.loadFeatured();
       if (request != _providerRequest) return;
       providerSongs = results;
+      library.rememberSongs(results);
     } catch (_) {
       if (request != _providerRequest) return;
       providerSongs = const [];
@@ -704,6 +710,7 @@ class MusicController extends ChangeNotifier {
       final results = await provider.searchSongs(value);
       if (request != _providerRequest) return;
       providerSongs = results;
+      library.rememberSongs(results);
     } catch (_) {
       if (request != _providerRequest) return;
       providerSongs = const [];
@@ -976,6 +983,7 @@ class MusicController extends ChangeNotifier {
       return;
     }
     current = song;
+    library.recordSongPlay(song);
     if (song.isProvider) {
       _recordStreamSong(song);
     } else if (!song.isPrivate) {
@@ -1147,8 +1155,20 @@ class MusicController extends ChangeNotifier {
   void toggleLike(Song song) {
     if (!liked.add(song.id)) liked.remove(song.id);
     _prefs.setStringList('likedSongIds', liked.toList());
+    library.setSongLiked(song, liked.contains(song.id));
     notifyListeners();
   }
+
+  /// Songs and videos (from every source) in one Home collection.
+  List<Song> librarySongs(MediaCollection collection) => library
+      .collection(collection)
+      .map((item) => item.song)
+      .whereType<Song>()
+      .take(50)
+      .toList();
+
+  /// Videos play in their own screen, outside [play].
+  void recordVideoPlay(Song song) => library.recordSongPlay(song);
 
   void toggleShuffle() {
     shuffle = !shuffle;
@@ -1520,6 +1540,7 @@ class MusicController extends ChangeNotifier {
   /// and recents. Stops playback when one of them is playing.
   Future<void> _forgetSongs(Set<String> ids) async {
     if (ids.isEmpty) return;
+    library.removeSongs(ids);
     songs = songs.where((item) => !ids.contains(item.id)).toList();
     queue = queue.where((item) => !ids.contains(item.id)).toList();
     for (final id in ids) {
@@ -2823,6 +2844,9 @@ class MusicController extends ChangeNotifier {
     _widgetTimer?.cancel();
     _audio.dispose();
     positionListenable.dispose();
+    library
+      ..removeListener(notifyListeners)
+      ..dispose();
     super.dispose();
   }
 }

@@ -18,7 +18,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # of the product and file versions while build-number is used as the build suffix.
 # The build number stays above 4001, the x86_64 split test build, so a new APK
 # installs over any earlier test APK instead of failing as a downgrade.
-version: 0.3.0+8018
+version: 0.3.1+8019
 
 environment:
   sdk: ^3.12.2
@@ -52,6 +52,8 @@ dependencies:
   pointycastle: ^4.0.0
 
 dev_dependencies:
+  integration_test:
+    sdk: flutter
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0

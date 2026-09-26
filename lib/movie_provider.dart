@@ -75,6 +75,13 @@ class MovieTitle {
   final String id, title, detailPath, poster, description, year, genre, rating;
   final bool isSeries;
 
+  Map<String, dynamic> toJson() => {
+    'subjectId': id, 'subjectType': isSeries ? 2 : 1, 'title': title,
+    'detailPath': detailPath, 'cover': {'url': poster},
+    'description': description, 'releaseDate': year, 'genre': genre,
+    'imdbRatingValue': rating,
+  };
+
   static MovieTitle? fromJson(Map raw) {
     final id = raw['subjectId']?.toString() ?? '';
     final title = raw['title']?.toString() ?? '';
